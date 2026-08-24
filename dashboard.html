@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anomalías en mallas de turnos — Shatter</title>
+<style>
+  :root{
+    --tinta:#16202c; --tinta-suave:#5b6b7c; --linea:#dfe5ec; --fondo:#f4f6f9;
+    --panel:#fff; --acento:#1d4ed8;
+    --critica:#b91c1c; --critica-f:#fee2e2;
+    --alta:#b45309;   --alta-f:#fef3c7;
+    --baja:#1d4ed8;   --baja-f:#dbeafe;
+    --ok:#047857;     --ok-f:#d1fae5;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.5 "Segoe UI",system-ui,sans-serif;color:var(--tinta);background:var(--fondo)}
+  header{background:var(--panel);border-bottom:1px solid var(--linea);padding:14px 22px;
+    display:flex;gap:18px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:10}
+  header h1{font-size:17px;margin:0;font-weight:650}
+  header .sub{color:var(--tinta-suave);font-size:12.5px}
+  .crece{flex:1}
+  select,input,button,textarea{font:inherit;color:inherit}
+  select,input,textarea{padding:6px 9px;border:1px solid var(--linea);border-radius:7px;background:#fff}
+  button{padding:6px 13px;border:1px solid var(--linea);border-radius:7px;background:#fff;cursor:pointer}
+  button:hover{background:#f0f4f9}
+  button.primario{background:var(--acento);border-color:var(--acento);color:#fff}
+  button.primario:hover{filter:brightness(1.08)}
+
+  nav{display:flex;gap:4px;padding:0 22px;background:var(--panel);border-bottom:1px solid var(--linea)}
+  nav button{border:0;border-bottom:2.5px solid transparent;border-radius:0;padding:11px 16px;
+    color:var(--tinta-suave);font-weight:600;background:none}
+  nav button.activa{color:var(--acento);border-bottom-color:var(--acento)}
+  nav .cuenta{display:inline-block;margin-left:7px;padding:1px 7px;border-radius:9px;
+    background:var(--fondo);font-size:12px;font-weight:700}
+
+  main{padding:22px;max-width:1500px;margin:0 auto}
+  .oculto{display:none}
+  h2{font-size:15px;margin:26px 0 11px;font-weight:650}
+  h2:first-child{margin-top:0}
+  .nota{color:var(--tinta-suave);font-size:13px;margin:-5px 0 13px;max-width:78ch}
+
+  .tarjetas{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:13px}
+  .tarjeta{background:var(--panel);border:1px solid var(--linea);border-radius:11px;padding:15px}
+  .tarjeta .rotulo{font-size:12px;color:var(--tinta-suave);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+  .tarjeta .cifra{font-size:29px;font-weight:680;margin-top:5px;line-height:1.1}
+  .tarjeta .pie{font-size:12.5px;color:var(--tinta-suave);margin-top:3px}
+  .tarjeta.roja .cifra{color:var(--critica)}
+  .tarjeta.ambar .cifra{color:var(--alta)}
+
+  .panel{background:var(--panel);border:1px solid var(--linea);border-radius:11px;overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--linea);vertical-align:top}
+  th{background:#fafbfd;font-weight:650;font-size:12px;text-transform:uppercase;
+    letter-spacing:.04em;color:var(--tinta-suave);position:sticky;top:0}
+  tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:#fafbfd}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+
+  .eti{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11.5px;font-weight:700;white-space:nowrap}
+  .eti.CRITICA{background:var(--critica-f);color:var(--critica)}
+  .eti.ALTA{background:var(--alta-f);color:var(--alta)}
+  .eti.BAJA{background:var(--baja-f);color:var(--baja)}
+  .eti.ABIERTA{background:#f1f5f9;color:#475569}
+  .eti.EN_REVISION{background:var(--alta-f);color:var(--alta)}
+  .eti.JUSTIFICADA{background:var(--baja-f);color:var(--baja)}
+  .eti.RESUELTA{background:var(--ok-f);color:var(--ok)}
+
+  .grupo td{background:#eef2f7;font-weight:650;font-size:13px}
+  .grupo .cuantos{float:right;color:var(--tinta-suave);font-weight:600}
+  .modo{display:flex;gap:0;border:1px solid var(--linea);border-radius:7px;overflow:hidden}
+  .modo button{border:0;border-radius:0;padding:6px 13px;background:#fff}
+  .modo button.activo{background:var(--acento);color:#fff}
+
+  .barra{height:7px;border-radius:4px;background:var(--linea);overflow:hidden;min-width:70px}
+  .barra i{display:block;height:100%;background:var(--acento)}
+  .filtros{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:13px;align-items:center}
+  .vacio{padding:34px;text-align:center;color:var(--tinta-suave)}
+  .cargando{padding:34px;text-align:center;color:var(--tinta-suave)}
+  .detalle{color:var(--tinta-suave);font-size:12.8px;max-width:62ch}
+
+  dialog{border:0;border-radius:13px;padding:0;max-width:660px;width:94%;
+    box-shadow:0 18px 50px rgba(15,30,50,.28)}
+  dialog::backdrop{background:rgba(15,30,50,.45)}
+  .modal-cab{padding:17px 21px;border-bottom:1px solid var(--linea)}
+  .modal-cab h3{margin:0;font-size:16px}
+  .modal-cuerpo{padding:21px;max-height:62vh;overflow:auto}
+  .modal-pie{padding:14px 21px;border-top:1px solid var(--linea);display:flex;gap:9px;justify-content:flex-end}
+  .campo{margin-bottom:15px}
+  .campo label{display:block;font-size:12.5px;font-weight:650;margin-bottom:5px}
+  .campo textarea{width:100%;min-height:78px;resize:vertical}
+  .campo select,.campo input{width:100%}
+  .aviso{background:var(--alta-f);color:var(--alta);padding:9px 12px;border-radius:8px;
+    font-size:13px;margin-bottom:14px}
+  .leyenda{font-size:12.5px;color:var(--tinta-suave);margin-top:9px}
+
+  @media print{
+    header,nav,.filtros,button{display:none!important}
+    body{background:#fff}
+    .panel{border-color:#bbb}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Anomalías en mallas de turnos</h1>
+    <div class="sub">Seguridad Shatter de Colombia LTDA BIC</div>
+  </div>
+  <div class="crece"></div>
+  <label class="sub">Periodo
+    <select id="periodo" onchange="cargarTodo()"></select>
+  </label>
+  <button onclick="identificarse()" id="btnUsuario">Identificarse</button>
+  <button onclick="window.print()">Imprimir</button>
+</header>
+
+<nav>
+  <button class="activa" data-panel="gerencia" onclick="verPanel(this)">Gerencia</button>
+  <button data-panel="programador" onclick="verPanel(this)">Programador<span class="cuenta" id="cuentaProg">0</span></button>
+  <button data-panel="nomina" onclick="verPanel(this)">Nómina<span class="cuenta" id="cuentaNom">0</span></button>
+</nav>
+
+<main>
+  <!-- ================= GERENCIA ================= -->
+  <section id="gerencia">
+    <h2>Panorama del periodo</h2>
+    <p class="nota">Cuántos incumplimientos legales tiene la malla publicada y a cuántos guardas afectan.
+      El porcentaje de cierre mide cuánto se ha gestionado, no cuánto se ha corregido en SERPI.</p>
+    <div class="tarjetas" id="kpis"></div>
+
+    <h2>Naturaleza de los hallazgos — quién debe actuar</h2>
+    <p class="nota">Distinción clave: lo <strong>puntual</strong> lo corrige el programador moviendo un turno.
+      Lo <strong>estructural</strong> no se arregla caso a caso — es consecuencia de que el patrón 2×2×2
+      (2 días diurnos, 2 nocturnos, 2 de descanso) ya opera cerca del tope legal, así que exige rediseñar
+      la plantilla. Si lo estructural domina, el problema no es de digitación sino de diseño de turnos.</p>
+    <div class="panel"><table>
+      <thead><tr><th>Naturaleza</th><th>Responsable</th><th class="num">Hallazgos</th><th style="width:38%">Peso</th></tr></thead>
+      <tbody id="tablaNaturaleza"></tbody>
+    </table></div>
+
+    <h2>Clientes con más incumplimientos</h2>
+    <p class="nota">Un hallazgo puede tocar varios clientes cuando el guarda rota entre puestos,
+      así que la suma por cliente supera el total del periodo. Es correcto: cada cliente carga
+      con el riesgo del turno que se le prestó.</p>
+    <div class="panel"><table>
+      <thead><tr><th>Cliente</th><th class="num">Críticas</th><th class="num">Altas</th>
+        <th class="num">Estructurales</th><th class="num">Guardas</th><th class="num">Total</th></tr></thead>
+      <tbody id="tablaClientes"></tbody>
+    </table></div>
+
+    <h2>Guardas con mayor carga estructural</h2>
+    <p class="nota">Horas realmente programadas en el mes. Sirve para decidir dónde rediseñar la plantilla
+      o reforzar el pool de ocasionales, no para sancionar al guarda.</p>
+    <div class="panel"><table>
+      <thead><tr><th>Guarda</th><th>Cliente(s)</th><th class="num">Horas del mes</th>
+        <th>&gt;60h/sem</th><th>Sin descanso</th><th>Racha larga</th></tr></thead>
+      <tbody id="tablaEstructural"></tbody>
+    </table></div>
+  </section>
+
+  <!-- ================= PROGRAMADOR ================= -->
+  <section id="programador" class="oculto">
+    <h2>Bandeja de corrección</h2>
+    <p class="nota">Solo hallazgos <strong>puntuales</strong>: los que se resuelven moviendo un turno concreto.
+      Los cruces de horario son físicamente imposibles de cumplir — alguien está asignado en dos sitios a la vez.
+      <strong>Agrupa por puesto</strong> para trabajar por tandas: en SERPI se navega cliente → puesto,
+      así entras una sola vez a cada puesto y corriges todo lo suyo de una pasada.</p>
+    <div class="filtros">
+      <div class="modo">
+        <button id="modoPuesto" class="activo" onclick="cambiarModo('puesto')">Por puesto</button>
+        <button id="modoUrgencia" onclick="cambiarModo('urgencia')">Por urgencia</button>
+      </div>
+      <select id="fSeveridad" onchange="cargarProgramador()">
+        <option value="">Toda severidad</option>
+        <option value="CRITICA">Crítica</option>
+        <option value="ALTA">Alta</option>
+      </select>
+      <select id="fEstado" onchange="cargarProgramador()">
+        <option value="">Abiertas y en revisión</option>
+        <option value="ABIERTA">Solo abiertas</option>
+        <option value="EN_REVISION">Solo en revisión</option>
+      </select>
+      <input id="fBusqueda" placeholder="Buscar guarda o cédula" oninput="debounce(cargarProgramador)">
+      <div class="crece"></div>
+      <button onclick="exportarCSV()">Exportar CSV</button>
+    </div>
+    <div class="panel"><table>
+      <thead><tr><th>Sev.</th><th>Regla</th><th>Guarda</th><th>Fecha</th>
+        <th>Qué pasa</th><th>Estado</th><th></th></tr></thead>
+      <tbody id="tablaProgramador"></tbody>
+    </table></div>
+  </section>
+
+  <!-- ================= NOMINA ================= -->
+  <section id="nomina" class="oculto">
+    <h2>Conciliación de horas</h2>
+    <p class="nota">Compara lo que SERPI declara contra lo que suman sus propias categorías y contra
+      las horas realmente programadas en la malla. Un descuadre no significa que se pagó mal:
+      significa que el registro no cuadra y hay que revisarlo antes de liquidar.</p>
+    <div class="filtros">
+      <label><input type="checkbox" id="soloDescuadres" checked onchange="cargarNomina()"> Solo filas descuadradas</label>
+    </div>
+    <div class="panel"><table>
+      <thead><tr><th>Guarda</th><th>Cliente / Puesto</th><th class="num">Declarado SERPI</th>
+        <th class="num">Suma categorías</th><th class="num">Descuadre</th><th class="num">Programado</th></tr></thead>
+      <tbody id="tablaNomina"></tbody>
+    </table></div>
+    <p class="leyenda">«Programado» son las horas que suman los turnos cargados en la malla para ese
+      guarda-puesto-mes. Puede diferir legítimamente de lo declarado (ausencias, novedades posteriores);
+      el <strong>descuadre</strong> —que el total no cuadre con sus propias categorías— es el que siempre es un error.</p>
+  </section>
+</main>
+
+<!-- Modal de gestión -->
+<dialog id="modal">
+  <form method="dialog">
+    <div class="modal-cab"><h3 id="mTitulo">Gestionar anomalía</h3></div>
+    <div class="modal-cuerpo">
+      <div id="mContexto"></div>
+      <div class="campo">
+        <label for="mEstado">Estado</label>
+        <select id="mEstado">
+          <option value="ABIERTA">Abierta — sin gestionar</option>
+          <option value="EN_REVISION">En revisión — la voy a corregir en SERPI</option>
+          <option value="JUSTIFICADA">Justificada — se acepta así como está</option>
+        </select>
+        <p class="leyenda">No hay opción «resuelta»: eso lo marca el sistema solo, cuando comprueba
+          que la anomalía ya no aparece en el siguiente cargue de la malla. Corrige en SERPI y
+          el próximo cargue te lo confirma.</p>
+      </div>
+      <div class="campo">
+        <label for="mNota">Nota / justificación</label>
+        <textarea id="mNota" placeholder="Qué vas a hacer, o por qué se acepta. Obligatorio al justificar."></textarea>
+      </div>
+      <div id="mHistorial"></div>
+    </div>
+    <div class="modal-pie">
+      <button value="cancel">Cancelar</button>
+      <button class="primario" type="button" onclick="guardarGestion()">Guardar</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const API = '';
+let TOKEN = localStorage.getItem('apiToken') || '';
+let USUARIO = localStorage.getItem('usuario') || '';
+let anomaliaActiva = null;
+let temporizador = null;
+
+function debounce(fn){ clearTimeout(temporizador); temporizador = setTimeout(fn, 300); }
+
+function cabeceras(extra){
+  const h = Object.assign({'Content-Type':'application/json'}, extra||{});
+  if (TOKEN) h['X-API-Token'] = TOKEN;
+  return h;
+}
+
+async function pedir(ruta, opciones){
+  const r = await fetch(API + ruta, Object.assign({headers: cabeceras()}, opciones||{}));
+  if (r.status === 401){ pedirToken(); throw new Error('No autorizado'); }
+  if (!r.ok){
+    let d; try { d = (await r.json()).detail; } catch(e){ d = r.statusText; }
+    throw new Error(typeof d === 'string' ? d : JSON.stringify(d));
+  }
+  return r.json();
+}
+
+function pedirToken(){
+  const t = prompt('Esta API exige token (X-API-Token). Pégalo aquí:');
+  if (t){ TOKEN = t; localStorage.setItem('apiToken', t); cargarTodo(); }
+}
+
+function identificarse(){
+  const n = prompt('Tu nombre (queda en el historial de cada anomalía que gestiones):', USUARIO);
+  if (n && n.trim()){
+    USUARIO = n.trim(); localStorage.setItem('usuario', USUARIO);
+    document.getElementById('btnUsuario').textContent = USUARIO;
+  }
+}
+
+function verPanel(btn){
+  mostrarPanel(btn.dataset.panel);
+  // Queda en la URL para poder enlazar una pestaña concreta en un correo
+  // y para que el botón «atrás» del navegador funcione como se espera.
+  history.replaceState(null, '', '#' + btn.dataset.panel);
+}
+
+function mostrarPanel(nombre){
+  const btn = document.querySelector(`nav button[data-panel="${nombre}"]`);
+  if (!btn) return;
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('activa'));
+  btn.classList.add('activa');
+  document.querySelectorAll('main section').forEach(s => s.classList.add('oculto'));
+  document.getElementById(nombre).classList.remove('oculto');
+}
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const periodoSel = () => document.getElementById('periodo').value;
+const fmt = n => (n === null || n === undefined) ? '—' :
+  Number(n).toLocaleString('es-CO', {maximumFractionDigits:1});
+
+// ---------- Gerencia ----------
+async function cargarGerencia(){
+  const p = periodoSel();
+  const k = await pedir(`/kpi?periodo=${p}`);
+  if (!k || !k.periodo){ document.getElementById('kpis').innerHTML = '<p class="vacio">Sin datos.</p>'; return; }
+
+  document.getElementById('kpis').innerHTML = `
+    <div class="tarjeta"><div class="rotulo">Hallazgos</div><div class="cifra">${fmt(k.total_hallazgos)}</div>
+      <div class="pie">en ${esc(k.periodo)}</div></div>
+    <div class="tarjeta roja"><div class="rotulo">Críticas</div><div class="cifra">${fmt(k.criticas)}</div>
+      <div class="pie">cruces imposibles de cumplir</div></div>
+    <div class="tarjeta ambar"><div class="rotulo">Guardas afectados</div><div class="cifra">${fmt(k.guardas_afectados)}</div>
+      <div class="pie">${fmt(k.pct_guardas_afectados)}% de ${fmt(k.guardas_totales)}</div></div>
+    <div class="tarjeta"><div class="rotulo">Pendientes</div><div class="cifra">${fmt(k.pendientes)}</div>
+      <div class="pie">${fmt(k.abiertas)} sin mirar · ${fmt(k.en_revision)} en revisión</div></div>
+    <div class="tarjeta"><div class="rotulo">Avance de gestión</div><div class="cifra">${fmt(k.pct_gestionado)}%</div>
+      <div class="pie">${fmt(k.resueltas)} corregidas · ${fmt(k.justificadas)} justificadas</div></div>`;
+
+  const total = k.puntuales + k.estructurales + k.administrativas;
+  const filas = [
+    ['Puntual', 'Programador de turnos', k.puntuales, 'Se corrige moviendo un turno'],
+    ['Estructural', 'Gerencia', k.estructurales, 'Exige rediseñar el patrón de turnos'],
+    ['Administrativa', 'Nómina', k.administrativas, 'El registro de horas no cuadra'],
+  ];
+  document.getElementById('tablaNaturaleza').innerHTML = filas.map(([n, r, v, d]) => `
+    <tr><td><strong>${n}</strong><div class="detalle">${d}</div></td><td>${r}</td>
+      <td class="num">${fmt(v)}</td>
+      <td><div class="barra"><i style="width:${total ? (v/total*100).toFixed(1) : 0}%"></i></div></td></tr>`).join('');
+
+  const cl = await pedir(`/clientes?periodo=${p}&limite=12`);
+  document.getElementById('tablaClientes').innerHTML = cl.length ? cl.map(c => `
+    <tr><td>${esc(c.cliente_nombre)}</td>
+      <td class="num">${c.criticas ? `<span class="eti CRITICA">${c.criticas}</span>` : '—'}</td>
+      <td class="num">${fmt(c.altas)}</td><td class="num">${fmt(c.estructurales)}</td>
+      <td class="num">${fmt(c.guardas_afectados)}</td>
+      <td class="num"><strong>${fmt(c.total_hallazgos)}</strong></td></tr>`).join('')
+    : '<tr><td colspan="6" class="vacio">Sin datos.</td></tr>';
+
+  const es = await pedir(`/estructural?periodo=${p}`);
+  document.getElementById('tablaEstructural').innerHTML = es.length ? es.slice(0, 20).map(e => `
+    <tr><td>${esc(e.guarda_nombre)}<div class="detalle">${esc(e.guarda_cedula)}</div></td>
+      <td class="detalle">${esc(e.clientes || '—')}</td>
+      <td class="num"><strong>${fmt(e.horas_mes)}</strong></td>
+      <td>${e.supera_60h ? 'Sí' : '—'}</td><td>${e.sin_descanso_semanal ? 'Sí' : '—'}</td>
+      <td>${e.racha_larga ? 'Sí' : '—'}</td></tr>`).join('')
+    : '<tr><td colspan="6" class="vacio">Sin carga estructural.</td></tr>';
+}
+
+// ---------- Programador ----------
+let MODO = 'puesto';
+let FILAS_PROG = [];
+
+function cambiarModo(m){
+  MODO = m;
+  document.getElementById('modoPuesto').classList.toggle('activo', m === 'puesto');
+  document.getElementById('modoUrgencia').classList.toggle('activo', m === 'urgencia');
+  pintarProgramador();
+}
+
+async function cargarProgramador(){
+  const qs = new URLSearchParams({periodo: periodoSel(), naturaleza: 'PUNTUAL', por_pagina: '500'});
+  const sev = document.getElementById('fSeveridad').value;
+  const est = document.getElementById('fEstado').value;
+  const bus = document.getElementById('fBusqueda').value.trim();
+  if (sev) qs.set('severidad', sev);
+  if (est) qs.set('estado', est);
+  if (bus) qs.set('busqueda', bus);
+
+  const r = await pedir('/anomalias?' + qs);
+  // Sin filtro explícito, la bandeja muestra solo lo que necesita acción.
+  FILAS_PROG = est ? r.datos : r.datos.filter(a => a.pendiente);
+  document.getElementById('cuentaProg').textContent = FILAS_PROG.length;
+  pintarProgramador();
+}
+
+function filaProg(a){
+  return `<tr>
+    <td><span class="eti ${a.severidad}">${a.severidad}</span></td>
+    <td>${esc(a.regla.replaceAll('_',' ').toLowerCase())}</td>
+    <td>${esc(a.guarda_nombre)}<div class="detalle">${esc(a.guarda_cedula)}</div></td>
+    <td>${esc(a.fecha_referencia)}</td>
+    <td class="detalle">${esc(a.detalle)}</td>
+    <td><span class="eti ${a.estado}">${a.estado.replace('_',' ')}</span></td>
+    <td><button onclick="abrirGestion(${a.id})">Gestionar</button></td>
+  </tr>`;
+}
+
+function pintarProgramador(){
+  const cuerpo = document.getElementById('tablaProgramador');
+  if (!FILAS_PROG.length){
+    cuerpo.innerHTML = '<tr><td colspan="7" class="vacio">Nada pendiente con estos filtros.</td></tr>';
+    return;
+  }
+  if (MODO === 'urgencia'){
+    cuerpo.innerHTML = FILAS_PROG.slice()
+      .sort((a,b) => (a.severidad_orden - b.severidad_orden) ||
+                     a.fecha_referencia.localeCompare(b.fecha_referencia))
+      .map(filaProg).join('');
+    return;
+  }
+  // Agrupado por cliente/puesto: cada bloque es una visita a SERPI.
+  const grupos = new Map();
+  for (const a of FILAS_PROG){
+    const clave = `${a.cliente_principal || '(sin cliente)'} ⟩ ${a.puesto_principal || '(sin puesto)'}`;
+    if (!grupos.has(clave)) grupos.set(clave, []);
+    grupos.get(clave).push(a);
+  }
+  const ordenados = [...grupos.entries()].sort((x,y) => y[1].length - x[1].length);
+  cuerpo.innerHTML = ordenados.map(([clave, filas]) => `
+    <tr class="grupo"><td colspan="7">${esc(clave)}
+      <span class="cuantos">${filas.length} hallazgo${filas.length===1?'':'s'} en este puesto</span></td></tr>
+    ${filas.sort((a,b) => (a.severidad_orden - b.severidad_orden) ||
+                          a.fecha_referencia.localeCompare(b.fecha_referencia))
+           .map(filaProg).join('')}`).join('');
+}
+
+function exportarCSV(){
+  if (!FILAS_PROG.length){ alert('No hay filas para exportar.'); return; }
+  const cols = ['cliente_principal','puesto_principal','guarda_nombre','guarda_cedula',
+                'fecha_referencia','severidad','regla','detalle','estado'];
+  const cabeza = ['Cliente','Puesto','Guarda','Cédula','Fecha','Severidad','Regla','Detalle','Estado'];
+  const escCsv = v => `"${String(v ?? '').replaceAll('"','""')}"`;
+  const filas = FILAS_PROG.slice().sort((a,b) =>
+    String(a.cliente_principal).localeCompare(String(b.cliente_principal)) ||
+    String(a.puesto_principal).localeCompare(String(b.puesto_principal)) ||
+    (a.severidad_orden - b.severidad_orden));
+  const csv = [cabeza.map(escCsv).join(';'),
+               ...filas.map(f => cols.map(c => escCsv(f[c])).join(';'))].join('\r\n');
+  // BOM para que Excel en español abra bien las tildes.
+  const blob = new Blob(['﻿' + csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `anomalias_${periodoSel()}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// ---------- Nómina ----------
+async function cargarNomina(){
+  const solo = document.getElementById('soloDescuadres').checked;
+  const r = await pedir(`/nomina?periodo=${periodoSel()}&solo_descuadres=${solo}`);
+  document.getElementById('cuentaNom').textContent = r.filter(f => Math.abs(f.descuadre_categorias || 0) > 0.01).length;
+  document.getElementById('tablaNomina').innerHTML = r.length ? r.slice(0, 400).map(f => {
+    const d = Number(f.descuadre_categorias || 0);
+    return `<tr>
+      <td>${esc(f.guarda_nombre)}<div class="detalle">${esc(f.guarda_cedula)}</div></td>
+      <td class="detalle">${esc(f.cliente)}<br>${esc(f.puesto)}</td>
+      <td class="num">${fmt(f.total_declarado_serpi)}</td>
+      <td class="num">${fmt(f.suma_categorias)}</td>
+      <td class="num">${Math.abs(d) > 0.01 ? `<span class="eti ${Math.abs(d) > 8 ? 'CRITICA':'ALTA'}">${d > 0 ? '+' : ''}${fmt(d)}</span>` : '—'}</td>
+      <td class="num">${fmt(f.horas_programadas)}</td></tr>`;
+  }).join('') : '<tr><td colspan="6" class="vacio">Sin filas.</td></tr>';
+}
+
+// ---------- Gestión (escritura) ----------
+async function abrirGestion(id){
+  if (!USUARIO){ identificarse(); if (!USUARIO) return; }
+  const a = await pedir('/anomalias/' + id);
+  anomaliaActiva = a;
+  document.getElementById('mTitulo').textContent = a.regla.replaceAll('_',' ');
+  document.getElementById('mContexto').innerHTML = `
+    <p><strong>${esc(a.guarda_nombre)}</strong> (${esc(a.guarda_cedula)}) — ${esc(a.fecha_referencia)}</p>
+    <p class="detalle">${esc(a.detalle)}</p>
+    <p class="detalle"><em>${esc(a.fundamento_legal || '')}</em></p>
+    ${a.turnos && a.turnos.length ? `<div class="panel" style="margin-top:12px"><table>
+      <thead><tr><th>Fecha</th><th>Turno</th><th>Horario</th><th>Puesto</th></tr></thead>
+      <tbody>${a.turnos.map(t => `<tr><td>${esc(t.fecha)}</td><td>${esc(t.tipo_turno_codigo)}</td>
+        <td>${esc(t.hora_inicio || '—')} – ${esc(t.hora_fin || '—')}</td>
+        <td class="detalle">${esc(t.puesto)}</td></tr>`).join('')}</tbody></table></div>` : ''}`;
+  // RESUELTA la pone solo el motor, así que no es una opción del selector:
+  // si la anomalía ya está resuelta, se muestra el estado editable más cercano.
+  document.getElementById('mEstado').value =
+    a.estado === 'RESUELTA' ? 'EN_REVISION' : a.estado;
+  document.getElementById('mNota').value = '';
+  document.getElementById('mHistorial').innerHTML = (a.historial && a.historial.length) ? `
+    <h2 style="margin-top:20px">Historial</h2>
+    <div class="panel"><table><tbody>${a.historial.map(h => `
+      <tr><td>${esc(new Date(h.ocurrido_en).toLocaleString('es-CO'))}</td>
+        <td>${esc(h.usuario)}</td>
+        <td>${esc(h.estado_anterior || '—')} → <strong>${esc(h.estado_nuevo)}</strong>
+          ${h.nota ? `<div class="detalle">${esc(h.nota)}</div>` : ''}</td></tr>`).join('')}
+    </tbody></table></div>` : '';
+  document.getElementById('modal').showModal();
+}
+
+async function guardarGestion(){
+  const estado = document.getElementById('mEstado').value;
+  const nota = document.getElementById('mNota').value.trim();
+  if (estado === 'JUSTIFICADA' && !nota){
+    alert('Para justificar una anomalía hay que explicar por qué se acepta así.');
+    return;
+  }
+  try{
+    await pedir('/anomalias/' + anomaliaActiva.id, {
+      method: 'PATCH',
+      headers: cabeceras({'X-Usuario': USUARIO}),
+      body: JSON.stringify({estado, nota: nota || null}),
+    });
+    document.getElementById('modal').close();
+    await Promise.all([cargarProgramador(), cargarGerencia()]);
+  } catch(e){ alert('No se pudo guardar: ' + e.message); }
+}
+
+// ---------- Arranque ----------
+async function cargarTodo(){
+  try{ await Promise.all([cargarGerencia(), cargarProgramador(), cargarNomina()]); }
+  catch(e){ console.error(e); }
+}
+
+(async function iniciar(){
+  if (USUARIO) document.getElementById('btnUsuario').textContent = USUARIO;
+  try{
+    const ps = await pedir('/periodos');
+    const sel = document.getElementById('periodo');
+    sel.innerHTML = ps.map(p => `<option value="${esc(p.periodo)}">${esc(p.periodo)}</option>`).join('');
+    if (ps.length) await cargarTodo();
+    if (location.hash) mostrarPanel(location.hash.slice(1));
+    window.addEventListener('hashchange', () => mostrarPanel(location.hash.slice(1)));
+  } catch(e){
+    document.querySelector('main').innerHTML =
+      `<div class="panel"><p class="vacio">No se pudo conectar con la API.<br><small>${esc(e.message)}</small></p></div>`;
+  }
+})();
+</script>
+</body>
+</html>

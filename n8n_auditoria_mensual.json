@@ -1,0 +1,252 @@
+{
+  "name": "Auditoria mensual de malla de turnos",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 28 * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Dia 28 a las 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-560, 200],
+      "notes": "Red de seguridad. La malla se carga en SERPI entre el 25 y el 27 PARA EL MES SIGUIENTE, asi que el dia 28 ya deberia estar completa. Auditar el mes entrante ANTES de que empiece le da al programador 3-4 dias para corregir en SERPI: eso convierte el sistema de retrospectivo en preventivo."
+    },
+    {
+      "parameters": {
+        "triggerOn": "folder",
+        "path": "/datos/serpi",
+        "events": ["add", "change"],
+        "options": {}
+      },
+      "id": "trigger-archivo",
+      "name": "Llega malla nueva",
+      "type": "n8n-nodes-base.localFileTrigger",
+      "typeVersion": 1,
+      "position": [-560, 400],
+      "notes": "Disparo principal: en cuanto alguien deja el RepProgramacion.xlsx exportado de SERPI en la carpeta, se audita. Ajusta la ruta a donde se deposite el export."
+    },
+    {
+      "parameters": {
+        "jsCode": "// El objetivo es el mes SIGUIENTE al actual: la malla que se acaba de\n// cargar en SERPI es la del mes entrante, y auditarla antes de que empiece\n// es lo que permite corregir a tiempo.\nconst hoy = new Date();\nconst inicio = new Date(Date.UTC(hoy.getUTCFullYear(), hoy.getUTCMonth() + 1, 1));\nconst fin = new Date(Date.UTC(hoy.getUTCFullYear(), hoy.getUTCMonth() + 2, 0));\n\nconst iso = (d) => d.toISOString().slice(0, 10);\nconst periodo = iso(inicio).slice(0, 7);\n\nreturn [{\n  json: {\n    periodo,\n    desde: iso(inicio),\n    hasta: iso(fin),\n    archivo: 'RepProgramacion.xlsx',\n  },\n}];"
+      },
+      "id": "calcular-periodo",
+      "name": "Calcular periodo objetivo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-320, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.API_TURNOS }}/salud",
+        "options": { "timeout": 10000 }
+      },
+      "id": "salud",
+      "name": "Verificar API y BD",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-100, 300],
+      "notes": "Falla temprano y con un mensaje claro si la API o PostgreSQL estan caidos, en vez de dejar a medias el pipeline. Define la variable API_TURNOS en n8n (ej. http://localhost:8000)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.API_TURNOS }}/pipeline/ejecutar",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ archivo: $('Calcular periodo objetivo').item.json.archivo, desde: $('Calcular periodo objetivo').item.json.desde, hasta: $('Calcular periodo objetivo').item.json.hasta }) }}",
+        "options": { "timeout": 1800000 }
+      },
+      "id": "pipeline",
+      "name": "Ejecutar ETL + motor de reglas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [120, 300],
+      "notes": "Ambos pasos son idempotentes: se puede reintentar sin duplicar nada. El ETL hace upsert por llave natural y el motor identifica cada anomalia por su huella, respetando el estado de las que alguien ya gestiono."
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.API_TURNOS }}/informe/mensual",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "periodo", "value": "={{ $('Calcular periodo objetivo').item.json.periodo }}" }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "informe",
+      "name": "Traer informe del periodo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [340, 300],
+      "notes": "Un solo payload con las cuatro secciones. Evita encadenar seis nodos HTTP y, sobre todo, evita recomponer logica de negocio dentro de expresiones de n8n."
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst r = d.resumen;\nconst esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));\n\nconst tarjeta = (rot, val, pie) => `<td style=\"padding:14px 18px;border:1px solid #dfe5ec;border-radius:10px\">\n  <div style=\"font-size:11px;color:#5b6b7c;text-transform:uppercase;letter-spacing:.05em\">${rot}</div>\n  <div style=\"font-size:26px;font-weight:700;color:#16202c\">${val}</div>\n  <div style=\"font-size:12px;color:#5b6b7c\">${pie}</div></td>`;\n\nconst clientes = d.clientes_criticos.map(c => `<tr>\n  <td style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\">${esc(c.cliente_nombre)}</td>\n  <td align=\"right\" style=\"padding:7px 10px;border-bottom:1px solid #eef2f7;color:#b91c1c;font-weight:700\">${c.criticas || ''}</td>\n  <td align=\"right\" style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\">${c.altas}</td>\n  <td align=\"right\" style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\">${c.guardas_afectados}</td>\n  <td align=\"right\" style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\"><b>${c.total_hallazgos}</b></td></tr>`).join('');\n\nconst pctEstructural = r.total_hallazgos ? Math.round(100 * r.estructurales / r.total_hallazgos) : 0;\n\nconst html = `<div style=\"font-family:Segoe UI,Arial,sans-serif;color:#16202c;max-width:760px\">\n<h2 style=\"margin:0 0 4px\">Auditoria de la malla &mdash; ${d.periodo}</h2>\n<p style=\"color:#5b6b7c;margin:0 0 18px\">Seguridad Shatter de Colombia LTDA BIC</p>\n\n<table cellspacing=\"8\" cellpadding=\"0\"><tr>\n${tarjeta('Hallazgos', r.total_hallazgos, 'en el periodo')}\n${tarjeta('Criticas', r.criticas, 'cruces imposibles de cumplir')}\n${tarjeta('Guardas afectados', r.guardas_afectados, r.pct_guardas_afectados + '% de ' + r.guardas_totales)}\n</tr></table>\n\n<h3 style=\"margin:24px 0 6px\">Quien debe actuar</h3>\n<table width=\"100%\" cellspacing=\"0\" style=\"border-collapse:collapse;font-size:14px\">\n<tr><td style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\">Puntual &mdash; el programador mueve un turno</td><td align=\"right\" style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\"><b>${r.puntuales}</b></td></tr>\n<tr><td style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\">Estructural &mdash; exige rediseñar el patron de turnos</td><td align=\"right\" style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\"><b>${r.estructurales}</b></td></tr>\n<tr><td style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\">Administrativa &mdash; nomina concilia el registro</td><td align=\"right\" style=\"padding:7px 10px;border-bottom:1px solid #eef2f7\"><b>${r.administrativas}</b></td></tr>\n</table>\n\n<div style=\"background:#fef3c7;color:#b45309;padding:12px 14px;border-radius:8px;margin:16px 0;font-size:14px\">\n<b>${pctEstructural}% de los hallazgos son estructurales.</b> No son errores de digitacion: son consecuencia de que el patron 2&times;2&times;2 ya opera cerca del tope legal. Corregirlos caso a caso no los elimina &mdash; vuelven el mes siguiente.\n</div>\n\n<h3 style=\"margin:24px 0 6px\">Clientes con mas incumplimientos</h3>\n<table width=\"100%\" cellspacing=\"0\" style=\"border-collapse:collapse;font-size:13px\">\n<tr style=\"background:#fafbfd;color:#5b6b7c;font-size:11px;text-transform:uppercase\">\n<td style=\"padding:7px 10px\">Cliente</td><td align=\"right\" style=\"padding:7px 10px\">Crit.</td>\n<td align=\"right\" style=\"padding:7px 10px\">Altas</td><td align=\"right\" style=\"padding:7px 10px\">Guardas</td>\n<td align=\"right\" style=\"padding:7px 10px\">Total</td></tr>\n${clientes}\n</table>\n<p style=\"color:#5b6b7c;font-size:12px\">Un hallazgo puede tocar varios clientes cuando el guarda rota entre puestos, asi que la suma por cliente supera el total del periodo.</p>\n\n<p style=\"margin-top:22px\"><a href=\"${$vars.URL_DASHBOARD}\" style=\"background:#1d4ed8;color:#fff;padding:10px 18px;border-radius:7px;text-decoration:none\">Abrir el dashboard</a></p>\n</div>`;\n\nreturn [{ json: { asunto: `Auditoria de malla ${d.periodo}: ${r.total_hallazgos} hallazgos, ${r.criticas} criticos`, html } }];"
+      },
+      "id": "correo-gerencia",
+      "name": "Armar correo gerencia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [580, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));\n\n// Agrupado por cliente/puesto, NO por severidad: en SERPI se navega\n// cliente -> puesto, asi que cada bloque es una sola visita en la que se\n// corrige todo lo de ese puesto de una pasada.\nconst grupos = new Map();\nfor (const a of d.programador) {\n  const clave = `${a.cliente_principal || '(sin cliente)'} &rsaquo; ${a.puesto_principal || '(sin puesto)'}`;\n  if (!grupos.has(clave)) grupos.set(clave, []);\n  grupos.get(clave).push(a);\n}\nconst ordenados = [...grupos.entries()].sort((x, y) => y[1].length - x[1].length);\n\nconst bloques = ordenados.map(([clave, filas]) => `\n<h4 style=\"margin:18px 0 4px;background:#eef2f7;padding:8px 10px;border-radius:6px;font-size:14px\">\n  ${esc(clave)} <span style=\"float:right;color:#5b6b7c;font-weight:normal\">${filas.length} hallazgo${filas.length === 1 ? '' : 's'}</span>\n</h4>\n<table width=\"100%\" cellspacing=\"0\" style=\"border-collapse:collapse;font-size:13px\">\n${filas.map(a => `<tr>\n  <td style=\"padding:6px 10px;border-bottom:1px solid #eef2f7;white-space:nowrap\">\n    <span style=\"background:${a.severidad === 'CRITICA' ? '#fee2e2;color:#b91c1c' : '#fef3c7;color:#b45309'};padding:2px 7px;border-radius:20px;font-size:11px;font-weight:700\">${a.severidad}</span></td>\n  <td style=\"padding:6px 10px;border-bottom:1px solid #eef2f7\">${esc(a.guarda_nombre)}<br><span style=\"color:#5b6b7c;font-size:12px\">${esc(a.guarda_cedula)} &middot; ${esc(a.fecha_referencia)}</span></td>\n  <td style=\"padding:6px 10px;border-bottom:1px solid #eef2f7;color:#5b6b7c\">${esc(a.detalle)}</td>\n</tr>`).join('')}\n</table>`).join('');\n\nconst criticas = d.programador.filter(a => a.severidad === 'CRITICA').length;\n\nconst html = `<div style=\"font-family:Segoe UI,Arial,sans-serif;color:#16202c;max-width:820px\">\n<h2 style=\"margin:0 0 4px\">Correcciones pendientes en la malla &mdash; ${d.periodo}</h2>\n<p style=\"color:#5b6b7c;margin:0 0 14px\">${d.programador.length} hallazgos que se corrigen moviendo un turno${criticas ? `, de los cuales <b style=\"color:#b91c1c\">${criticas} son cruces de horario</b> (el guarda esta asignado en dos sitios a la vez)` : ''}.</p>\n<p style=\"background:#dbeafe;color:#1d4ed8;padding:10px 14px;border-radius:8px;font-size:13px\">Estan agrupados por puesto: entra una sola vez a cada puesto en SERPI y corrige todo lo suyo de una pasada.</p>\n${bloques}\n<p style=\"margin-top:22px\"><a href=\"${$vars.URL_DASHBOARD}\" style=\"background:#1d4ed8;color:#fff;padding:10px 18px;border-radius:7px;text-decoration:none\">Abrir el dashboard</a></p>\n<p style=\"color:#5b6b7c;font-size:12px\">No tienes que marcar nada como resuelto: corrige en SERPI y el proximo cargue de la malla lo confirma solo.</p>\n</div>`;\n\nreturn [{ json: { asunto: `Malla ${d.periodo}: ${d.programador.length} correcciones pendientes${criticas ? ` (${criticas} criticas)` : ''}`, html } }];"
+      },
+      "id": "correo-programador",
+      "name": "Armar correo programador",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [580, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.nomina.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "hay-descuadres",
+      "name": "Hay descuadres?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [580, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));\n\nconst filas = d.nomina.map(f => `<tr>\n  <td style=\"padding:6px 10px;border-bottom:1px solid #eef2f7\">${esc(f.guarda_nombre)}<br><span style=\"color:#5b6b7c;font-size:12px\">${esc(f.guarda_cedula)}</span></td>\n  <td style=\"padding:6px 10px;border-bottom:1px solid #eef2f7;color:#5b6b7c;font-size:12px\">${esc(f.cliente)}<br>${esc(f.puesto)}</td>\n  <td align=\"right\" style=\"padding:6px 10px;border-bottom:1px solid #eef2f7\">${f.total_declarado_serpi}</td>\n  <td align=\"right\" style=\"padding:6px 10px;border-bottom:1px solid #eef2f7\">${f.suma_categorias}</td>\n  <td align=\"right\" style=\"padding:6px 10px;border-bottom:1px solid #eef2f7;font-weight:700;color:#b45309\">${f.descuadre_categorias > 0 ? '+' : ''}${f.descuadre_categorias}</td>\n</tr>`).join('');\n\nconst html = `<div style=\"font-family:Segoe UI,Arial,sans-serif;color:#16202c;max-width:780px\">\n<h2 style=\"margin:0 0 4px\">Horas a conciliar antes de liquidar &mdash; ${d.periodo}</h2>\n<p style=\"color:#5b6b7c;margin:0 0 16px\">${d.nomina.length} filas donde el <b>Total Horas</b> que declara SERPI no coincide con la suma de sus propias cuatro categorias. No significa que se haya pagado mal: significa que el registro no cuadra y hay que revisarlo antes de liquidar.</p>\n<table width=\"100%\" cellspacing=\"0\" style=\"border-collapse:collapse;font-size:13px\">\n<tr style=\"background:#fafbfd;color:#5b6b7c;font-size:11px;text-transform:uppercase\">\n<td style=\"padding:7px 10px\">Guarda</td><td style=\"padding:7px 10px\">Cliente / Puesto</td>\n<td align=\"right\" style=\"padding:7px 10px\">Declarado</td><td align=\"right\" style=\"padding:7px 10px\">Suma categorias</td>\n<td align=\"right\" style=\"padding:7px 10px\">Descuadre</td></tr>\n${filas}\n</table>\n<p style=\"margin-top:20px\"><a href=\"${$vars.URL_DASHBOARD}\" style=\"background:#1d4ed8;color:#fff;padding:10px 18px;border-radius:7px;text-decoration:none\">Ver en el dashboard</a></p>\n</div>`;\n\nreturn [{ json: { asunto: `Nomina ${d.periodo}: ${d.nomina.length} descuadres de horas por conciliar`, html } }];"
+      },
+      "id": "correo-nomina",
+      "name": "Armar correo nomina",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 500]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $vars.CORREO_REMITENTE }}",
+        "toEmail": "={{ $vars.CORREO_GERENCIA }}",
+        "subject": "={{ $json.asunto }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "enviar-gerencia",
+      "name": "Enviar a gerencia",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [860, 100]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $vars.CORREO_REMITENTE }}",
+        "toEmail": "={{ $vars.CORREO_PROGRAMADOR }}",
+        "subject": "={{ $json.asunto }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "enviar-programador",
+      "name": "Enviar a programador",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $vars.CORREO_REMITENTE }}",
+        "toEmail": "={{ $vars.CORREO_NOMINA }}",
+        "subject": "={{ $json.asunto }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "enviar-nomina",
+      "name": "Enviar a nomina",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1080, 500]
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Si algo falla",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-560, 640]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $vars.CORREO_REMITENTE }}",
+        "toEmail": "={{ $vars.CORREO_ADMIN }}",
+        "subject": "=[FALLO] Auditoria de malla: {{ $json.execution.error.message }}",
+        "html": "=<p>La auditoria mensual de la malla fallo.</p><p><b>Nodo:</b> {{ $json.execution.lastNodeExecuted }}<br><b>Error:</b> {{ $json.execution.error.message }}</p><p>El ETL y el motor son idempotentes: se puede reintentar la ejecucion sin duplicar datos.</p>",
+        "options": {}
+      },
+      "id": "avisar-admin",
+      "name": "Avisar al administrador",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [-320, 640]
+    }
+  ],
+  "connections": {
+    "Dia 28 a las 07:00": {
+      "main": [[{ "node": "Calcular periodo objetivo", "type": "main", "index": 0 }]]
+    },
+    "Llega malla nueva": {
+      "main": [[{ "node": "Calcular periodo objetivo", "type": "main", "index": 0 }]]
+    },
+    "Calcular periodo objetivo": {
+      "main": [[{ "node": "Verificar API y BD", "type": "main", "index": 0 }]]
+    },
+    "Verificar API y BD": {
+      "main": [[{ "node": "Ejecutar ETL + motor de reglas", "type": "main", "index": 0 }]]
+    },
+    "Ejecutar ETL + motor de reglas": {
+      "main": [[{ "node": "Traer informe del periodo", "type": "main", "index": 0 }]]
+    },
+    "Traer informe del periodo": {
+      "main": [[
+        { "node": "Armar correo gerencia", "type": "main", "index": 0 },
+        { "node": "Armar correo programador", "type": "main", "index": 0 },
+        { "node": "Hay descuadres?", "type": "main", "index": 0 }
+      ]]
+    },
+    "Armar correo gerencia": {
+      "main": [[{ "node": "Enviar a gerencia", "type": "main", "index": 0 }]]
+    },
+    "Armar correo programador": {
+      "main": [[{ "node": "Enviar a programador", "type": "main", "index": 0 }]]
+    },
+    "Hay descuadres?": {
+      "main": [
+        [{ "node": "Armar correo nomina", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Armar correo nomina": {
+      "main": [[{ "node": "Enviar a nomina", "type": "main", "index": 0 }]]
+    },
+    "Si algo falla": {
+      "main": [[{ "node": "Avisar al administrador", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

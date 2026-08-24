@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# DATOS REALES — NUNCA VERSIONAR
+#
+# La malla y el análisis contienen nombres y cédulas de 404 trabajadores
+# reales. Subirlos a un repositorio (aunque sea privado) los deja en el
+# historial de git de forma permanente: borrar el archivo después NO los
+# quita del historial. Además de la política interna, aplica la Ley 1581 de
+# 2012 (habeas data).
+#
+# Para correr el proyecto, pide el export a quien administre SERPI y déjalo
+# en la raíz con el nombre RepProgramacion.xlsx.
+# ---------------------------------------------------------------------------
+*.xlsx
+*.xls
+*.csv
+
+# Informes autónomos generados para reuniones: llevan los datos reales
+# incrustados, así que se distribuyen internamente pero NO se versionan.
+informe_*.html
+
+# Credenciales
+.env
+.env.local
+
+# Exports y respaldos que puedan contener PII
+export/
+*.dump
+*.sql.gz
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# Entorno de desarrollo
+.vscode/
+.idea/
+*.log
+.DS_Store
+Thumbs.db
+
+# Permisos locales de Claude Code (rutas de cada maquina)
+.claude/settings.local.json
