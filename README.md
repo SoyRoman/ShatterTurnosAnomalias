@@ -1,4 +1,4 @@
-# ETL malla de turnos → PostgreSQL
+# Detección de anomalías en mallas de turnos
 
 Normaliza el export de SERPI (`RepProgramacion.xlsx`) e inserta la
 información en PostgreSQL siguiendo el esquema de `schema.sql`.
@@ -7,8 +7,8 @@ información en PostgreSQL siguiendo el esquema de `schema.sql`.
 
 - `schema.sql` — crea las tablas (clientes, puestos, guardas, tipos_turno,
   turnos, horas_declaradas_mes, reglas_anomalia, anomalias).
-- `seed_reglas.sql` — opcional, precarga las 7 reglas de anomalías para
-  cuando construyas el motor de reglas (no es necesario para el ETL).
+- `seed_reglas.sql` — precarga las 7 reglas con su taxonomía por responsable
+  (naturaleza y área que debe actuar). Idempotente.
 - `etl_normalizacion.py` — lee el Excel y carga `clientes`, `puestos`,
   `guardas`, `tipos_turno`, `turnos` y `horas_declaradas_mes`.
 - `motor_reglas.py` — evalúa las 7 reglas de anomalías sobre los turnos ya
@@ -23,6 +23,8 @@ información en PostgreSQL siguiendo el esquema de `schema.sql`.
 - `migracion_002_dashboard.sql`, `migracion_003_estados.sql` — solo para bases
   creadas con versiones anteriores del esquema. En instalación limpia no hacen
   falta: `schema.sql` ya las incorpora.
+- `generar_informe.py` — genera un informe autónomo en un solo HTML.
+- `test_reglas.py` — pruebas de los detectores; no necesitan base de datos.
 - `requirements.txt`, `.env.example`.
 
 ## Primera vez
@@ -70,9 +72,10 @@ puestos distintos) y evalúa las 7 reglas de `reglas_anomalia`, resolviendo el
 umbral vigente para la fecha de cada hallazgo.
 
 Cada corrida borra y regenera las anomalías en estado `ABIERTA` para las
-reglas y guardas evaluados; las que ya están en `EN_REVISION`,
-`TICKET_CREADO` o `CERRADA` no se tocan, para no resucitar ni duplicar algo
-que un humano ya revisó.
+reglas y guardas evaluados; las que ya están en `EN_REVISION` o
+`JUSTIFICADA` no se tocan, para no resucitar ni duplicar algo que un humano
+ya revisó. Cada anomalía se identifica por una `huella` derivada de llaves
+de negocio, así que sobrevive a una recarga completa del ETL.
 
 Las funciones `detectar_*` en `motor_reglas.py` son puras (reciben una lista
 de turnos, devuelven violaciones) para poder reutilizarse en modo predictivo
@@ -157,3 +160,19 @@ necesitas la migración (`ALTER TABLE ... ADD COLUMN slot ...` + cambiar la
 `UNIQUE`) y luego **vaciar y recargar** `turnos`/`horas_declaradas_mes`
 completos — un `slot` con valor por defecto sobre filas ya colapsadas deja
 datos huérfanos que no corresponden a ningún slot real.
+
+## Informe autónomo para reuniones
+
+```bash
+python3 generar_informe.py --periodo 2026-07
+```
+
+Produce `informe_2026-07.html`: **un solo archivo** con los datos del periodo
+incrustados, que se abre con doble clic. No necesita servidor, base de datos ni
+internet, así que se le puede enviar a gerencia para que lo proyecte por su
+cuenta. Es de solo lectura (sin botones de gestión) y lleva un aviso con la
+fecha del corte.
+
+> **Contiene nombres y cédulas reales.** Se distribuye internamente igual que
+> el Excel de la malla: nunca en un repositorio ni en un servicio público.
+> `.gitignore` ya excluye `informe_*.html`.

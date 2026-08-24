@@ -281,11 +281,22 @@ function identificarse(){
   }
 }
 
+// El hash lleva prefijo «ver-» a propósito: si fuera «#programador» coincidiría
+// con el id de la sección y el navegador saltaría a ella, dejando la cabecera y
+// las pestañas fuera de la pantalla. Con un valor que no existe como id, no hay
+// nada a lo que saltar y la página abre desde arriba.
+const PREFIJO = 'ver-';
+
 function verPanel(btn){
   mostrarPanel(btn.dataset.panel);
   // Queda en la URL para poder enlazar una pestaña concreta en un correo
   // y para que el botón «atrás» del navegador funcione como se espera.
-  history.replaceState(null, '', '#' + btn.dataset.panel);
+  history.replaceState(null, '', '#' + PREFIJO + btn.dataset.panel);
+}
+
+function panelDesdeHash(){
+  const h = location.hash.slice(1);
+  return h.startsWith(PREFIJO) ? h.slice(PREFIJO.length) : h;
 }
 
 function mostrarPanel(nombre){
@@ -519,8 +530,8 @@ async function cargarTodo(){
     const sel = document.getElementById('periodo');
     sel.innerHTML = ps.map(p => `<option value="${esc(p.periodo)}">${esc(p.periodo)}</option>`).join('');
     if (ps.length) await cargarTodo();
-    if (location.hash) mostrarPanel(location.hash.slice(1));
-    window.addEventListener('hashchange', () => mostrarPanel(location.hash.slice(1)));
+    if (location.hash) mostrarPanel(panelDesdeHash());
+    window.addEventListener('hashchange', () => mostrarPanel(panelDesdeHash()));
   } catch(e){
     document.querySelector('main').innerHTML =
       `<div class="panel"><p class="vacio">No se pudo conectar con la API.<br><small>${esc(e.message)}</small></p></div>`;
