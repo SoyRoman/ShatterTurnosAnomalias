@@ -29,18 +29,38 @@ información en PostgreSQL siguiendo el esquema de `schema.sql`.
 
 ## Primera vez
 
+Si es la primera vez que se corre este proyecto en esta máquina, PostgreSQL
+necesita el rol y la base de datos — `.env.example` asume que ya existen, no
+los crea:
+
+```bash
+psql -U postgres
+```
+
+```sql
+CREATE ROLE turnos_app WITH LOGIN PASSWORD 'elige-una-clave-fuerte';
+CREATE DATABASE turnos OWNER turnos_app;
+\q
+```
+
+Con eso ya listo:
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate          # en Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# edita .env con host/usuario/clave de tu PostgreSQL
+# edita .env: DB_PASSWORD debe ser la clave que elegiste arriba
 
 psql -U turnos_app -d turnos -f schema.sql
 psql -U turnos_app -d turnos -f seed_reglas.sql
 psql -U turnos_app -d turnos -f vistas_reporte.sql
 ```
+
+> `.env` nunca viaja con el repo (está en `.gitignore`): al clonar en una
+> máquina nueva hay que repetir este paso, con una clave propia de esa
+> máquina — no reutilices la del PC donde se hizo el desarrollo original.
 
 Los tres son idempotentes: se pueden volver a correr sin duplicar nada.
 
