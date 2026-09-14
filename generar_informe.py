@@ -84,6 +84,12 @@ async function pedir(ruta, opciones){
   const q = new URLSearchParams(consulta || '');
   if (camino === '/periodos')    return [{periodo: DATOS.periodo}];
   if (camino === '/kpi')         return DATOS.kpi;
+  // Un informe estatico no tiene sesion ni a quien atribuir nada: es de solo
+  // lectura y el boton de identificarse se elimina mas abajo. Se responde
+  // explicitamente en vez de dejar que `resolverIdentidad` caiga en su catch,
+  // para que la consola del navegador quede limpia y el modo sea una decision
+  // y no el resultado de un error.
+  if (camino === '/identidad')   return {modo: 'DECLARATIVA', usuario: null};
   if (camino === '/clientes')    return DATOS.clientes;
   if (camino === '/estructural') return DATOS.estructural;
   if (camino === '/nomina'){

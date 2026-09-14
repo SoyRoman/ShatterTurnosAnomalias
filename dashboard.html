@@ -247,6 +247,11 @@
 const API = '';
 let TOKEN = localStorage.getItem('apiToken') || '';
 let USUARIO = localStorage.getItem('usuario') || '';
+// 'DECLARATIVA' (el nombre lo escribe la persona) o 'PROXY' (lo pone el
+// autenticador). Lo dice la API en /identidad; se asume lo primero hasta que
+// responda, que es el comportamiento seguro: si por algo falla esa consulta el
+// dashboard sigue enviando X-Usuario y la gestión no se rompe.
+let MODO_IDENTIDAD = 'DECLARATIVA';
 let anomaliaActiva = null;
 let temporizador = null;
 
@@ -274,10 +279,38 @@ function pedirToken(){
 }
 
 function identificarse(){
+  if (MODO_IDENTIDAD === 'PROXY'){
+    alert('Tu identidad viene de tu inicio de sesión (' + USUARIO + ') y no se '
+        + 'puede cambiar aquí: es lo que hace que el historial de auditoría sea '
+        + 'confiable.');
+    return;
+  }
   const n = prompt('Tu nombre (queda en el historial de cada anomalía que gestiones):', USUARIO);
   if (n && n.trim()){
     USUARIO = n.trim(); localStorage.setItem('usuario', USUARIO);
     document.getElementById('btnUsuario').textContent = USUARIO;
+  }
+}
+
+async function resolverIdentidad(){
+  try{
+    const r = await pedir('/identidad');
+    MODO_IDENTIDAD = r.modo;
+    if (r.modo === 'PROXY'){
+      USUARIO = r.usuario || '';
+      // El nombre ya no es del navegador: si quedó uno guardado de la época
+      // declarativa, se borra para que nadie crea que sigue en uso.
+      localStorage.removeItem('usuario');
+      const btn = document.getElementById('btnUsuario');
+      if (btn){   // puede no existir: ver la guarda en iniciar()
+        btn.textContent = USUARIO || 'sesión no verificada';
+        btn.title = 'Identidad verificada por el inicio de sesión';
+      }
+    }
+  } catch(e){
+    // Una API vieja no tiene /identidad. Se sigue en modo declarativo, que es
+    // exactamente como se comportaba antes.
+    console.warn('No se pudo consultar /identidad; se asume modo declarativo.', e);
   }
 }
 
@@ -507,9 +540,11 @@ async function guardarGestion(){
     return;
   }
   try{
+    // X-Usuario solo en modo declarativo. En modo PROXY la API la ignora, y
+    // enviarla igual sugeriría que el navegador puede decidir quién firma.
     await pedir('/anomalias/' + anomaliaActiva.id, {
       method: 'PATCH',
-      headers: cabeceras({'X-Usuario': USUARIO}),
+      headers: MODO_IDENTIDAD === 'PROXY' ? cabeceras() : cabeceras({'X-Usuario': USUARIO}),
       body: JSON.stringify({estado, nota: nota || null}),
     });
     document.getElementById('modal').close();
@@ -524,8 +559,14 @@ async function cargarTodo(){
 }
 
 (async function iniciar(){
-  if (USUARIO) document.getElementById('btnUsuario').textContent = USUARIO;
+  // El botón puede no existir: generar_informe.py lo elimina del informe
+  // autónomo, que es de solo lectura y no tiene a quien atribuir nada. Sin esta
+  // guarda, un nombre guardado en localStorage haría que el informe se
+  // renderizara en blanco por un TypeError en la primera línea del arranque.
+  const btn = document.getElementById('btnUsuario');
+  if (USUARIO && btn) btn.textContent = USUARIO;
   try{
+    await resolverIdentidad();
     const ps = await pedir('/periodos');
     const sel = document.getElementById('periodo');
     sel.innerHTML = ps.map(p => `<option value="${esc(p.periodo)}">${esc(p.periodo)}</option>`).join('');

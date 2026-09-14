@@ -1,0 +1,44 @@
+# Lo que NO debe entrar en la imagen.
+#
+# Esto no es solo por tamano: una imagen es un artefacto que se sube a un
+# registry, se copia entre maquinas y guarda cada capa para siempre. Meter aqui
+# el .env o una malla con PII es exactamente el mismo error que versionarlos en
+# git, con el agravante de que las imagenes se comparten con mas soltura.
+
+# ---- CREDENCIALES -----------------------------------------------------------
+# Las variables entran en tiempo de EJECUCION (env_file en compose), nunca
+# horneadas en una capa.
+.env
+.env.local
+Migracion/
+
+# ---- DATOS REALES CON PII ---------------------------------------------------
+*.xlsx
+*.xls
+*.csv
+Reportes mensuales/
+informe_*.html
+export/
+*.dump
+*.sql.gz
+*.har
+*.descarga_cruda
+CONTEXTO_API_SERPI.md
+
+# ---- ruido de desarrollo ----------------------------------------------------
+.git/
+.gitignore
+.claude/
+.vscode/
+.idea/
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+logs/
+*.log
+.pipeline_diario.lock
+Dockerfile
+.dockerignore
+docker-compose.yml

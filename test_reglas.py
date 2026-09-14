@@ -146,6 +146,40 @@ check("8 días seguidos dispara SIN_DESCANSO_SEMANAL con 2 ventanas (N-6)",
 check("SIN_DESCANSO_SEMANAL se identifica por periodo, no por día",
       s[0]['clave'] == '2026-07')
 
+# --- Reglas de ventana móvil a caballo entre dos meses -------------------
+# Regresión de un bug real (detectado con julio+agosto+septiembre cargados):
+# estos detectores agregaban sobre TODO el rango evaluado y devolvían UNA
+# sola fila por guarda, con la clave del mes de la semana pico. Al llegar un
+# mes nuevo con una semana peor, la clave migraba, la huella de julio
+# desaparecía y `marcar_resueltas` la daba por RESUELTA sin que nadie hubiera
+# corregido nada. Agosto se hace deliberadamente PEOR que julio: con el
+# código viejo la fila se iría a agosto y julio se perdería.
+jul = [turno(i + 1, 10, dt.date(2026, 7, 20) + dt.timedelta(days=i), T(6), T(18))
+       for i in range(12)]                       # 12 días de 12h (84h/semana)
+ago = [turno(100 + i, 10, dt.date(2026, 8, 1) + dt.timedelta(days=i), T(6), T(19))
+       for i in range(10)]                       # 10 días de 13h (91h/semana): peor
+cruzado = jul + ago
+
+sem_cruzado = m.detectar_semana_excesiva(cruzado, 60)
+claves_sem = {v['clave'] for v in sem_cruzado}
+check("SEMANA_SUPERA_60H da una fila POR MES, no una sola por guarda",
+      claves_sem == {'2026-07', '2026-08'})
+
+sem_solo_jul = m.detectar_semana_excesiva(jul, 60)
+check("SEMANA_SUPERA_60H: la fila de julio sobrevive a que llegue agosto",
+      {v['clave'] for v in sem_solo_jul} <= claves_sem)
+
+sd_cruzado = m.detectar_sin_descanso_semanal(cruzado)
+claves_sd = {v['clave'] for v in sd_cruzado}
+check("SIN_DESCANSO_SEMANAL da una fila POR MES, no una sola por guarda",
+      claves_sd == {'2026-07', '2026-08'})
+check("SIN_DESCANSO_SEMANAL: la fila de julio sobrevive a que llegue agosto",
+      {v['clave'] for v in m.detectar_sin_descanso_semanal(jul)} <= claves_sd)
+
+check("cada fila mensual referencia un día de su propio mes",
+      all(v['fecha_referencia'].strftime('%Y-%m') == v['clave']
+          for v in sem_cruzado + sd_cruzado))
+
 # --- DESCUADRE_HORAS_DECLARADAS ---
 cuadrada = {'horas_diurnas_ordinarias': 100, 'horas_diurnas_festivas': 10,
             'horas_nocturnas_ordinarias': 50, 'horas_nocturnas_festivas': 0,

@@ -1,0 +1,168 @@
+# Orquestacion del sistema de deteccion de anomalias.
+#
+#   docker compose up -d api                    # levanta la API + dashboard
+#   docker compose run --rm pipeline            # corrida diaria, a mano
+#   docker compose run --rm pipeline --archivo "Reportes mensuales/x.xlsx"
+#   docker compose --profile local up -d        # + PostgreSQL local (pruebas)
+#
+# La BD es EXTERNA por defecto (RDS en AWS, o el PostgreSQL del servidor de la
+# empresa): se configura por .env. El servicio `postgres` de aqui abajo esta
+# detras de un profile y solo existe para levantar el stack completo en una
+# maquina de pruebas sin depender de nada mas.
+
+services:
+
+  # -------------------------------------------------------------------------
+  # api — FastAPI + dashboard. El unico proceso de larga duracion.
+  # -------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      target: api
+    image: turnos-api:latest
+    container_name: turnos-api
+    # `unless-stopped` cubre tambien el arranque con el profile `local`: la API
+    # abre el pool de conexiones en el lifespan, asi que si PostgreSQL todavia
+    # no acepta conexiones el proceso muere y Docker lo reintenta hasta que si.
+    # No se usa `depends_on: postgres` porque Compose exige que quien depende
+    # de un servicio con profile comparta ese profile, y eso obligaria a la API
+    # a existir solo en pruebas locales.
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # A LOOPBACK a proposito, no a 0.0.0.0.
+      #
+      # La autenticacion real YA existe: MODO_IDENTIDAD=PROXY lee la identidad
+      # de una cabecera que pone el autenticador e ignora X-Usuario (ver
+      # CLAUDE.md §7). El problema es que su DEFAULT es DECLARATIVA, donde se
+      # cree lo que manda el cliente, y olvidar la variable no produce ningun
+      # error: la API arranca y funciona igual, solo lo avisa por consola.
+      #
+      # O sea que esta linea no compensa una falta de autenticacion, compensa un
+      # default peligroso: es lo unico que impide que un despliegue distraido
+      # quede expuesto en modo declarativo, donde cualquiera podria firmar una
+      # justificacion con el nombre de otro.
+      #
+      # En produccion, con cloudflared en esta misma red de compose, ni siquiera
+      # hace falta este puerto (ver despliegue/CLOUDFLARE.md). Para publicarlo
+      # sin proxy — solo en red interna cerrada — pon API_BIND=0.0.0.0 en .env,
+      # a sabiendas.
+      - "${API_BIND:-127.0.0.1}:8000:8000"
+    logging:
+      # Sin limite, los logs de un contenedor `unless-stopped` llenan el disco
+      # de la EC2 en semanas y tumban tambien a PostgreSQL si es local.
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  # -------------------------------------------------------------------------
+  # cloudflared — el tunel que autentica a las personas (solo produccion)
+  # -------------------------------------------------------------------------
+  # Es el autenticador que exige MODO_IDENTIDAD=PROXY: valida contra el
+  # Entra ID (Microsoft 365) de la empresa e inyecta la identidad ya verificada
+  # Cf-Access-Authenticated-User-Email. Configuracion paso a paso, incluida la
+  # comprobacion de que no quede ninguna politica Bypass (equivaldria a dejar
+  # las lecturas abiertas a internet), en despliegue/CLOUDFLARE.md.
+  #
+  # El tunel sale HACIA Cloudflare, asi que la EC2 no necesita ningun ingreso en
+  # su grupo de seguridad. Y como corre en esta misma red de compose, alcanza a
+  # la API por `api:8000`: en produccion se puede comentar el bloque `ports:`
+  # de `api` y la API deja de ser alcanzable incluso desde la propia maquina.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: turnos-tunel
+    profiles: ["produccion"]
+    restart: unless-stopped
+    # El token va por ENTORNO y no como `--token` en la linea de comandos, por
+    # dos razones:
+    #  1. Seguridad: un argumento queda visible en `docker inspect`, en la
+    #     lista de procesos del host y en cualquier log que imprima el comando.
+    #     `cloudflared` lee TUNNEL_TOKEN de forma nativa.
+    #  2. `${VAR:?...}` se evalua aunque el servicio NO este en el perfil
+    #     activo, asi que exigirlo aqui rompia `docker compose config` y el
+    #     arranque en local, donde no hay tunel. Con `:-` queda vacio y el
+    #     fallo, si llega, es de cloudflared y dice lo que pasa.
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    command: tunnel --no-autoupdate run
+    depends_on: [api]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # -------------------------------------------------------------------------
+  # pipeline — corrida diaria. NO es un servicio: arranca, trabaja y termina.
+  # -------------------------------------------------------------------------
+  # Con `profiles` queda fuera de `docker compose up`, que es lo correcto: un
+  # `up` no debe disparar por sorpresa una descarga de 20 minutos contra SERPI
+  # ni una reconciliacion que borra turnos. Lo invoca el timer de systemd
+  # (ver despliegue/) o una persona, siempre con `run --rm`.
+  pipeline:
+    build:
+      context: .
+      target: pipeline
+    image: turnos-pipeline:latest
+    profiles: ["manual"]
+    env_file: .env
+    volumes:
+      # Las mallas descargadas y la bitacora deben SOBREVIVIR al contenedor:
+      # son la evidencia de que una anomalia se evaluo contra unos datos
+      # concretos en una fecha concreta (trazabilidad ante MinTrabajo).
+      - "./Reportes mensuales:/app/Reportes mensuales"
+      - "./logs:/app/logs"
+    # Chromium necesita mas que los 64 MB de /dev/shm que da Docker por
+    # defecto; con el default se cae a mitad de la descarga con errores que no
+    # apuntan a la causa ("Target closed", "Connection closed").
+    shm_size: "1gb"
+    # No reintentar aqui: pipeline_diario.py ya reintenta la descarga, y
+    # reintentar el ETL a ciegas es justo lo que no queremos.
+    restart: "no"
+
+  # -------------------------------------------------------------------------
+  # postgres — SOLO para pruebas locales (profile `local`).
+  # -------------------------------------------------------------------------
+  # En AWS este servicio no se usa: la BD es RDS. Motivos para no meter la BD
+  # en un contenedor en produccion: los respaldos, el point-in-time recovery y
+  # el cifrado en reposo pasarian a ser tarea nuestra, y aqui vive un rastro de
+  # auditoria laboral que no puede depender de que alguien se acuerde de hacer
+  # `pg_dump`.
+  #
+  # Para usarlo, en .env:  DB_HOST=postgres
+  postgres:
+    image: postgres:18-alpine
+    container_name: turnos-db
+    profiles: ["local"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-turnos}
+      POSTGRES_USER: ${DB_USER:-turnos_app}
+      # Aqui SI se usa `:?` y en cloudflared `:-`, y no es una inconsistencia:
+      # DB_PASSWORD la necesita cualquier perfil (la API tampoco arranca sin
+      # ella), asi que fallar ruidosamente cuando falta es correcto. El token
+      # del tunel, en cambio, solo existe en el servidor, y exigirlo romperia
+      # `docker compose config` en cualquier maquina de desarrollo.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD es obligatorio}
+      TZ: America/Bogota
+    volumes:
+      # /var/lib/postgresql y NO /var/lib/postgresql/data: a partir de la imagen
+      # 18 los datos van en un subdirectorio con la version mayor
+      # (.../18/docker), para que `pg_upgrade --link` no cruce el limite del
+      # montaje. Con la ruta vieja la imagen 18 arranca, detecta datos en un
+      # "unused mount/volume" y entra en bucle de reinicio.
+      - datos_postgres:/var/lib/postgresql
+      # Los .sql del proyecto se aplican SOLOS la primera vez que se crea el
+      # volumen, en orden alfabetico. Por eso los numeros: schema antes que
+      # migraciones, y las vistas al final, cuando ya existen las columnas que
+      # consultan. Son idempotentes, asi que reaplicarlos no rompe nada.
+      - ./schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./migracion_002_dashboard.sql:/docker-entrypoint-initdb.d/02_dashboard.sql:ro
+      - ./migracion_003_estados.sql:/docker-entrypoint-initdb.d/03_estados.sql:ro
+      - ./seed_reglas.sql:/docker-entrypoint-initdb.d/04_reglas.sql:ro
+      - ./vistas_reporte.sql:/docker-entrypoint-initdb.d/05_vistas.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-turnos_app} -d ${DB_NAME:-turnos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  datos_postgres:

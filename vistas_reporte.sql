@@ -120,9 +120,20 @@ SELECT
     v.periodo,
     count(*)                                                        AS total_hallazgos,
     count(DISTINCT v.guarda_cedula)                                 AS guardas_afectados,
-    (SELECT count(*) FROM guardas)                                  AS guardas_totales,
+    -- Denominador: los guardas PROGRAMADOS en ese mes, no el catalogo completo.
+    -- Usar `count(*) FROM guardas` era un error sutil y peligroso: el catalogo
+    -- es la union de todos los meses cargados, asi que crece con cada cargue y
+    -- diluye el porcentaje de todos los meses hacia abajo. Medido: julio marcaba
+    -- 43,6% (176/404) cuando era el unico mes; al cargar agosto y septiembre el
+    -- catalogo subio a 413 y el MISMO julio pasaba a 42,6% sin que ningun dato
+    -- de julio cambiara. En una herramienta de cumplimiento el sesgo iba en la
+    -- direccion peligrosa: hacer ver que todo mejora solo por acumular meses.
+    (SELECT count(DISTINCT t.guarda_cedula) FROM turnos t
+      WHERE to_char(t.fecha, 'YYYY-MM') = v.periodo)                AS guardas_totales,
     round(100.0 * count(DISTINCT v.guarda_cedula)
-          / NULLIF((SELECT count(*) FROM guardas), 0), 1)           AS pct_guardas_afectados,
+          / NULLIF((SELECT count(DISTINCT t.guarda_cedula) FROM turnos t
+                     WHERE to_char(t.fecha, 'YYYY-MM') = v.periodo), 0), 1)
+                                                                    AS pct_guardas_afectados,
     count(*) FILTER (WHERE v.severidad = 'CRITICA')                 AS criticas,
     count(*) FILTER (WHERE v.severidad = 'ALTA')                    AS altas,
     count(*) FILTER (WHERE v.severidad = 'BAJA')                    AS bajas,

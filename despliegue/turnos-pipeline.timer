@@ -1,0 +1,42 @@
+# Cuando corre la auditoria diaria.
+#
+#   sudo systemctl enable --now turnos-pipeline.timer
+#   systemctl list-timers turnos-pipeline.timer     # proxima ejecucion
+#   sudo systemctl start turnos-pipeline.service    # forzar una corrida ahora
+
+[Unit]
+Description=Dispara la auditoria diaria de la malla de turnos
+Documentation=file:///opt/turnos/CLAUDE.md
+
+[Timer]
+Unit=turnos-pipeline.service
+
+# 04:30 hora de Bogota. La eleccion no es arbitraria:
+#  - antes de que llegue el personal administrativo, asi que el dashboard ya
+#    tiene la foto de hoy cuando alguien lo abre
+#  - de madrugada el servidor de reportes de SERPI esta descargado, y ese
+#    reporte es lento incluso vacio (ver descargar_malla_serpi.py)
+#  - despues de medianoche, asi que "el mes actual" ya es el dia correcto
+OnCalendar=*-*-* 04:30:00
+
+# OnCalendar usa la zona horaria DEL SISTEMA, no UTC. Una EC2 recien creada
+# viene en UTC, asi que esto se dispararia a las 23:30 de Bogota del dia
+# anterior. Hay que fijarla en el host, no solo en la imagen:
+#   sudo timedatectl set-timezone America/Bogota
+# Son dos ajustes distintos y los dos hacen falta: el host decide CUANDO se
+# lanza la corrida, y el TZ del Dockerfile decide que dia cree que es el
+# contenedor al calcular el rango de fechas.
+
+# Si la maquina estaba apagada a las 04:30 (o la EC2 detenida para ahorrar),
+# corre en cuanto arranque en vez de saltarse el dia. Esto es lo que convierte
+# "auditoria diaria" en una promesa real: un dia sin corrida es un dia en que
+# una violacion nueva no se detecto y nadie se entero.
+Persistent=true
+
+# Reparte el arranque en una ventana de 10 min. Con una sola maquina da igual;
+# importa si algun dia hay varias apuntando al mismo SERPI, para no pedirle
+# varios reportes pesados en el mismo segundo.
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

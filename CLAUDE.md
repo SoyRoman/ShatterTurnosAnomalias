@@ -56,10 +56,14 @@ para pedir formalmente la API de turnos.
    datos. **[HECHO — pendiente de correr contra la BD real y validar contra
    el análisis manual de 386 hallazgos]**
 3. Exponer una API propia de consulta de turnos y anomalías. **[HECHO —
-   `api.py`, puerto único: dashboard y n8n consumen solo esto]**
-4. Dashboard propio con las tres bandejas (programador / nómina / gerencia) y
-   orquestación mensual en n8n. **[HECHO — `dashboard.html`,
-   `n8n_auditoria_mensual.json`]**
+   `api.py`, puerto único: el dashboard y cualquier integración consumen solo
+   esto]**
+4. Dashboard propio con las tres bandejas (programador / nómina / gerencia).
+   **[HECHO — `dashboard.html`]**
+5. Corrida diaria automática que cierre el ciclo (corregir en SERPI → el
+   sistema lo confirma solo). **[HECHO — `pipeline_diario.py` + timer de
+   systemd en `despliegue/`, empaquetado en `Dockerfile` /
+   `docker-compose.yml`]**
 
 > **Corrección importante (agosto 2026).** Una versión anterior de este archivo
 > planteaba «automatizar el registro de anomalías críticas como tickets en
@@ -196,12 +200,19 @@ correr el ETL, no está hardcodeado — se detectaron 99 códigos distintos):
 ## 5. Arquitectura
 
 ```
-   Datos de turnos
-   (Excel hoy → API SERPI mañana)
+   timer de systemd (04:30 diario)   ← despliegue/ [HECHO]
             │
             ▼
+   pipeline_diario.py            ← encadena los tres pasos [HECHO]
+            │
+            ▼
+   Datos de turnos
+   (Excel vía RPA hoy → API SERPI mañana)
+            │                     ← descargar_malla_serpi.py [HECHO]
+            ▼
    ETL y normalización          ← etl_normalizacion.py [HECHO]
-   (parsea códigos y horarios)
+   (parsea códigos y horarios;
+    upsert + reconciliación)
             │
             ▼
       PostgreSQL                 ← schema.sql [HECHO]
@@ -220,19 +231,33 @@ correr el ETL, no está hardcodeado — se detectaron 99 códigos distintos):
             ▼
    api.py  ◄══ PUERTO ÚNICO ══►  nadie más abre conexiones a la BD
             │
-    ┌───────┴────────┐
-    ▼                ▼
- dashboard.html    n8n (cron + correos)
-    │
-    ▼
- el usuario corrige en SERPI
+            ▼
+      dashboard.html
+            │
+            ▼
+ el usuario corrige en SERPI ──┐
+                               │
+   (y al día siguiente el timer vuelve a arriba y lo confirma:
+    la anomalía ya no aparece y el motor la marca RESUELTA sola)
 ```
 
-**Stack:** Python + PostgreSQL + FastAPI, orquestado con **n8n**.
+**Stack:** Python + PostgreSQL + FastAPI, empaquetado en Docker y programado
+con un timer de systemd.
 
-**Todo corre self-hosted en servidor propio de la empresa.** Es una decisión
-consciente y condiciona el resto: los datos tienen PII real de 404 trabajadores
-y no pueden salir de la empresa (Ley 1581 de 2012, habeas data).
+> **n8n quedó descartado** (decisión del usuario, septiembre 2026). Una versión
+> anterior de este archivo lo daba como orquestador y `n8n_auditoria_mensual.json`
+> está eliminado a propósito — **no lo recrees.** `pipeline_diario.py` + timer de
+> systemd hacen lo mismo con una pieza menos que mantener y con los códigos de
+> salida visibles para el supervisor. Lo único que se perdió y no tiene
+> reemplazo son los tres correos por audiencia (§8).
+
+**Los datos tienen PII real de 404 trabajadores** (Ley 1581 de 2012, habeas
+data), y eso condiciona el despliegue: nada de servicios que no se puedan
+cubrir con un DPA, y la BD nunca expuesta a internet. Se descartó Vercel por
+esto y porque además no puede correr el ETL, el motor ni Chromium. El destino
+decidido es AWS (RDS PostgreSQL + la app al lado), y **hasta que esté validado
+las pruebas siguen siendo locales** — no se tocan las bases de producción ni de
+pruebas de la empresa.
 
 > **Looker Studio quedó descartado.** Una versión anterior de este archivo lo
 > daba como destino de los reportes de gerencia. No es viable: es un servicio de
@@ -248,7 +273,7 @@ la lógica de presentación vive en SQL, en un solo sitio.
 
 Son `VIEW` y no `MATERIALIZED VIEW` a propósito: con ~400 guardas y ~400
 anomalías/mes el join cuesta milisegundos, y materializar sólo agregaría un
-`REFRESH` al flujo de n8n y la posibilidad de servir datos viejos. Si el
+`REFRESH` a la corrida diaria y la posibilidad de servir datos viejos. Si el
 histórico crece a años, se materializan sin tocar a quien las consume.
 
 ### Modelo de datos
@@ -321,12 +346,18 @@ turnos_etl/
 ├── migracion_002_dashboard.sql  huella + taxonomía + historial
 ├── migracion_003_estados.sql    estados del proceso real
 ├── vistas_reporte.sql      capa semántica (read model) por audiencia
-├── etl_normalizacion.py    ETL Excel → PostgreSQL
+├── etl_normalizacion.py    ETL Excel → PostgreSQL (upsert + reconciliación)
 ├── motor_reglas.py         motor de reglas: turnos → anomalias
-├── api.py                  FastAPI — puerto único (dashboard + n8n)
+├── api.py                  FastAPI — puerto único (dashboard + integraciones)
 ├── dashboard.html          3 bandejas; lo sirve la propia API en /
-├── n8n_auditoria_mensual.json   flujo importable + 3 correos
+├── descargar_malla_serpi.py     RPA de descarga (Playwright)
+├── pipeline_diario.py      corrida diaria: descarga + ETL + motor
+├── Dockerfile              dos targets: api (sin navegador) y pipeline
+├── docker-compose.yml      api · pipeline (profile manual) · postgres (local)
+├── despliegue/             systemd (.service + .timer), DESPLIEGUE.md,
+│                          CLOUDFLARE.md
 ├── test_reglas.py          pruebas de los detectores (no necesitan BD)
+├── test_api_identidad.py   pruebas de MODO_IDENTIDAD (SI necesitan BD)
 ├── requirements.txt        openpyxl, psycopg2-binary, python-dotenv, fastapi, uvicorn
 ├── .env.example            plantilla de conexión
 └── .env                    credenciales reales — NO versionar
@@ -345,6 +376,14 @@ uvicorn api:app --host 0.0.0.0 --port 8000  # dashboard en http://servidor:8000/
 
 Los tres `.sql` y los dos scripts son **idempotentes**: correrlos de nuevo no
 duplica nada.
+
+En operación esos tres pasos no se corren a mano: los encadena
+`pipeline_diario.py` (descarga + ETL + motor), que es lo que dispara el timer de
+systemd a diario. Sus **códigos de salida son un contrato** con el supervisor y
+no se deben colapsar a 0/1: `2` descarga, `3` ETL roto, `4` ETL abortado por el
+umbral de borrado (**requiere revisión humana**, la BD quedó intacta a
+propósito), `5` motor, `6` ya había otra corrida. El `3` y el `4` significan
+cosas opuestas para quien recibe la alerta y por eso están separados.
 
 **Salida esperada con la malla de julio 2026** (úsala como test de regresión —
 si tocas el parser y estos números cambian, algo se rompió):
@@ -437,12 +476,29 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
   motor con `--cedula` o `--desde/--hasta` marcaría como resuelto todo lo demás,
   que ni siquiera se evaluó.
 
-- **La identidad del usuario en el dashboard es declarativa, no autenticación.**
-  La cabecera `X-Usuario` sirve para atribuir en `anomalias_historial`, pero
-  nadie verifica que quien la envía sea quien dice. `API_TOKEN` autentica al
-  *sistema* que llama (dashboard, n8n), no a la *persona*. Es una limitación
-  consciente para operar en red interna: **antes de exponer esto fuera de la
-  red hay que enganchar el login real de la empresa.**
+- **La identidad del usuario es declarativa POR DEFECTO, y eso sigue siendo una
+  trampa.** `API_TOKEN` autentica al *sistema* que llama (el dashboard), no a la
+  *persona*. Para la persona hay dos modos en `MODO_IDENTIDAD`:
+  - `DECLARATIVA` (default): se cree la cabecera `X-Usuario`. Nadie verifica
+    que quien la envía sea quien dice. **Solo aceptable en red interna
+    cerrada**, y la API lo avisa por consola al arrancar.
+  - `PROXY`: la identidad se lee de `CABECERA_IDENTIDAD`, puesta por un proxy
+    que ya autenticó a la persona. **`X-Usuario` se ignora** y su ausencia es
+    `403`. Es lo que hay que activar para exponer el dashboard.
+  - **El default es el modo inseguro a propósito**, para no romper la operación
+    actual en red interna. Eso significa que *no ponerlo* es un fallo
+    silencioso: la API arranca y funciona igual. Por eso
+    `docker-compose.yml` no publica puerto al host — la única barrera real
+    contra desplegar en modo declarativo es que no haya por dónde llegar.
+  - **Nunca añadas una caída de vuelta a `X-Usuario` en modo `PROXY`.** Sería
+    justo el agujero que el modo cierra: bastaría alcanzar la API sin pasar por
+    el proxy para firmar como cualquiera. Protegido por
+    `test_api_identidad.py`; si esa prueba empieza a dar `404` donde espera
+    `403`, el agujero volvió.
+  - La confianza en una cabecera plana se sostiene **por la red**, no por
+    criptografía. Si algún día la API queda alcanzable directamente, hay que
+    verificar el JWT firmado (`Cf-Access-Jwt-Assertion` en Cloudflare Access,
+    `x-amzn-oidc-data` en ALB+Cognito).
 
 - **`motor_reglas.py` escanea con el umbral de la versión de regla más
   reciente**, no una por cada fecha. Cada violación puntual sí se guarda con
@@ -471,6 +527,69 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
   agregación sin volver a correr `motor_reglas.py` contra
   `Deteccion de anomalias Julio.xlsx` para confirmar que sigue coincidiendo.
 
+- **«Una fila por guarda **y mes**» significa por mes, no por rango
+  evaluado.** Es la misma frase del punto anterior, pero la primera
+  implementación la leyó mal y agregaba sobre **todo** lo que hubiera en la
+  base: `detectar_semana_excesiva` y `detectar_sin_descanso_semanal`
+  devolvían **una sola fila por guarda**, con la clave del mes donde caía la
+  semana pico. Con un solo mes cargado las dos lecturas son idénticas —por
+  eso la validación de julio pasaba y el bug quedó latente—; pero al cargar
+  agosto y septiembre la semana pico se corría de mes, la `clave` cambiaba y
+  **la huella del mes anterior desaparecía**. Y como `marcar_resueltas` da
+  por `RESUELTA` toda huella que ya no aparece, el sistema le decía al
+  usuario *«tu corrección llegó»* sobre una violación que nadie tocó — el
+  peor fallo posible aquí, y justo el que `reabrir_reincidentes` existe para
+  evitar. Medido: se perdieron 6 hallazgos de julio al cargar agosto.
+  - Ya corregido: **cada ventana móvil pertenece al mes de su día de
+    INICIO**, y los tres detectores de ventana/racha respetan esa misma
+    convención. Protegido por pruebas en `test_reglas.py` (agosto se
+    construye deliberadamente peor que julio para que la fila migre si
+    alguien revierte esto).
+  - **El contrato de los 386 solo aplica con julio como único mes en la
+    base.** `cargar_turnos_guarda` NO filtra por fecha: `--desde/--hasta`
+    acota qué hallazgos se escriben, no qué datos se evalúan. Con agosto
+    cargado, una ventana que arranca el 28 de julio por fin se ve completa
+    (antes se truncaba el 31) y aparecen violaciones reales que no eran
+    visibles: julio pasa de 386 a 407. Eso es **más** correcto, no menos. Si
+    vas a re-validar los 386, hazlo alimentando los detectores solo con
+    julio, no corriendo el motor con `--desde/--hasta` sobre una base que ya
+    tiene más meses.
+
+- **En el contenedor, `/app` NO es escribible, y eso es a propósito.** El
+  código pertenece a root y el proceso corre como `turnos` (uid 10001), así
+  que los únicos directorios donde se puede escribir son `logs/` y
+  `Reportes mensuales/`, que además son volúmenes persistentes. Dos versiones
+  de `pipeline_diario.py` cayeron aquí: el candado estaba en la raíz del
+  proyecto y la malla se descargaba a un `RepProgramacion.xlsx` fijo, también
+  en la raíz. Ambos daban `PermissionError` solo dentro del contenedor, no en
+  local. **Cualquier archivo que un script genere en tiempo de ejecución tiene
+  que ir a uno de esos dos directorios.**
+  - De paso, la malla ya no se descarga a un nombre fijo que se sobreescribe,
+    sino a `Reportes mensuales/RepProgramacion_<desde>_a_<hasta>_<AAAAMMDD>.xlsx`.
+    Un archivo único reescrito a diario destruye la evidencia de qué datos se
+    evaluaron cada día, que es justo lo que sustenta la trazabilidad.
+
+- **La zona horaria hay que fijarla en DOS sitios.** `TZ` en el `Dockerfile`
+  decide qué día cree que es el contenedor al calcular el rango de fechas;
+  `timedatectl` en el host decide a qué hora dispara `OnCalendar` de systemd
+  (que usa la zona del sistema, no UTC). Una EC2 recién creada viene en UTC:
+  sin el primer ajuste, una corrida de las 19:00 de Bogotá del día 31 pide la
+  malla del mes entrante y el rango se corre un mes completo; sin el segundo,
+  el timer de las 04:30 se dispara a las 23:30 del día anterior.
+
+- **El volumen de PostgreSQL va en `/var/lib/postgresql`, no en
+  `/var/lib/postgresql/data`.** Desde la imagen 18 los datos viven en un
+  subdirectorio por versión mayor (para que `pg_upgrade --link` no cruce el
+  límite del montaje). Con la ruta antigua el contenedor arranca, detecta datos
+  en un *"unused mount/volume"* y entra en bucle de reinicio — y el mensaje no
+  dice cuál es el arreglo.
+
+- **En systemd, las rutas con espacios van entre comillas.** `ReadWritePaths`
+  separa por espacios, así que `/opt/turnos/Reportes mensuales` sin comillas se
+  lee como dos rutas, el arranque falla con *"Failed to parse"* y **el timer
+  queda muerto en silencio** — que en una auditoría diaria es el peor modo de
+  fallo posible.
+
 ---
 
 ## 8. Próximos pasos
@@ -485,20 +604,48 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
    (filtrable y paginado), `/anomalias/{id}` (detalle con los turnos que la
    originaron + historial), `PATCH /anomalias/{id}` (gestión con auditoría),
    `/kpi`, `/clientes`, `/nomina`, `/estructural`, `/reglas`,
-   `/pipeline/ejecutar` y `/informe/mensual` (payload único para n8n).
+   `/pipeline/ejecutar` y `/informe/mensual` (payload único de los correos
+   por audiencia, todavía sin remitente — ver §8).
 3. ~~**Dashboard**~~ — **hecho** (`dashboard.html`, lo sirve la propia API).
    Tres bandejas por audiencia. La del programador se agrupa **por puesto**, no
    por severidad: en SERPI se navega cliente → puesto, así que agrupar así
    permite entrar una vez a cada puesto y corregir todo lo suyo de una pasada.
    En julio, 176 hallazgos puntuales se agrupan en 50 visitas, y las 5 primeras
    cubren 77 (44%).
-4. ~~**Orquestación n8n**~~ — **hecha** (`n8n_auditoria_mensual.json`). Se
-   dispara cuando llega el Excel, con un cron del día 28 como red de seguridad.
-   **Audita el mes SIGUIENTE**: la malla se carga del 25 al 27 para el mes
-   entrante, así que auditarla el 28 le da al programador 3–4 días para
-   corregir **antes de que entre en vigencia** — que es el salto de detección
+4. ~~**Orquestación**~~ — **hecha, y n8n quedó descartado** (decisión del
+   usuario, septiembre 2026). El flujo `n8n_auditoria_mensual.json` está
+   eliminado a propósito: **no lo recrees.** Lo reemplaza `pipeline_diario.py`
+   disparado por un timer de systemd (`despliegue/`), que hace lo mismo con una
+   pieza menos que mantener y con los códigos de salida visibles. Los tres
+   correos por audiencia que hacía n8n **todavía no tienen reemplazo** — el
+   payload que los alimentaba sigue existiendo en `/informe/mensual`.
+   **Cubre el mes SIGUIENTE**: el rango por defecto son dos meses (actual +
+   entrante) porque la malla se carga del 25 al 27 para el mes que viene; así
+   aparece el mismo día que la cargan y el programador tiene 3–4 días para
+   corregir **antes de que entre en vigencia** — el salto de detección
    retrospectiva a prevención.
-5. **Jornada de referencia 42h — pendiente, solo desde agosto 2026.** Julio ya
+5. ~~**Descarga automática diaria de la malla**~~ — **hecha** (`descargar_malla_serpi.py`).
+   La API general de SERPI (usuario admin + Secret Key + token, ver §1) es solo
+   el núcleo ERP contable/comercial: no expone ningún endpoint de turnos,
+   programación ni asistencia. Mientras el proveedor no la construya, este
+   script automatiza lo mismo que hace un usuario a mano (login web + reporte
+   de programación con todos los filtros vacíos = todos los clientes), vía
+   Playwright. SERPI entrega el export como `.xls` binario antiguo (no
+   `.xlsx`), así que el script lo convierte antes de entregárselo al ETL. El
+   reporte es lento en el servidor de SERPI (varios minutos incluso para un
+   solo día), el timeout por defecto es generoso a propósito.
+   **No lo programes directamente:** lo invoca `pipeline_diario.py`, que además
+   hace el ETL y el motor.
+6. ~~**Corrida diaria y empaquetado**~~ — **hechos y probados en contenedor**
+   (`pipeline_diario.py`, `Dockerfile`, `docker-compose.yml`, `despliegue/`).
+   Esto es lo que cierra el ciclo central del §2: el usuario corrige en SERPI y
+   a la mañana siguiente el motor marca `RESUELTA` sola. Verificado de punta a
+   punta contra un PostgreSQL 18 vacío (los cinco `.sql` en orden → 9 tablas,
+   7 vistas, 7 reglas) y con la cadena completa: agosto 303 hallazgos y
+   septiembre encima 244, idéntico al resultado en local. La red de seguridad
+   del ETL también está probada de verdad: forzando el aborto, el pipeline sale
+   con `4`, **no** corre el motor y la BD queda intacta.
+7. **Jornada de referencia 42h — pendiente, solo desde agosto 2026.** Julio ya
    se facturó y pagó con la regla vieja de 44h, así que **julio no se toca**.
    La regla está escrita y comentada al final de `seed_reglas.sql`; para
    activarla, descoméntala y corre `python motor_reglas.py --desde 2026-08-01`.
@@ -506,10 +653,45 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
    referencia **no es ilegal** en vigilancia (la Ley 1920 permite hasta 60h con
    suplementarias, y ese tope sí lo cubre `SEMANA_SUPERA_60H`); lo que exige es
    pagarlas con recargo y registrarlas. Es asunto de liquidación.
-6. **Autenticación real** antes de exponer el dashboard fuera de la red interna
-   (ver "Errores conocidos").
-7. **Migración a la API de SERPI** cuando exista: cambiar la fuente del ETL y
-   marcar `origen = 'API_SERPI'`. Nada más debería cambiar.
+8. ~~**Autenticación real**~~ — **código hecho** (septiembre 2026). Dos modos
+   en `MODO_IDENTIDAD` (`DECLARATIVA` / `PROXY`) con `CABECERA_IDENTIDAD`
+   configurable, así que sirve igual para Cloudflare Access o ALB+Cognito y la
+   decisión de infraestructura no bloqueó el código. Probado con
+   `test_api_identidad.py` (14 comprobaciones, cero escrituras en la base).
+   En el mismo cambio se arregló que `/anomalias` ignorara en silencio los
+   parámetros desconocidos: ahora responde 422.
+   **Falta configurar Cloudflare Access** y poner `MODO_IDENTIDAD=PROXY` en el
+   servidor — ver `despliegue/CLOUDFLARE.md`. Ojo: el default es el modo
+   inseguro, así que olvidarlo no da ningún error (ver §7).
+9. **Despliegue en AWS — pendiente.** Decidido (septiembre 2026): **se queda en
+   PostgreSQL**, sobre RDS, en la misma cuenta de AWS que el resto. Se evaluó
+   meter el esquema en el MySQL de la empresa (`bitacorapp_staging`, el único
+   donde el usuario disponible puede crear tablas) y se descartó con números:
+   ~68 construcciones de PostgreSQL a reescribir —18 de ellas estructurales
+   (`BIGINT[]` + `unnest`, `RETURNING`, `xmax = 0`)—, 75 ms de latencia por
+   consulta contra ese host, y el rastro de auditoría (`anomalias_historial`)
+   quedaría dentro de un esquema Laravel vivo, escribible por cualquier
+   desarrollador de la bitácora. De `bitacorapp` se lee, no se escribe: sirve
+   para el cruce de asistencia por cédula.
+   El paso a paso completo —seis fases, con criterios de aceptación
+   verificables y costos— está en **`despliegue/DESPLIEGUE.md`**. Léelo antes
+   de proponer cambios de infraestructura.
+   Falta: crear el RDS, subir las imágenes, y **las pruebas siguen siendo
+   locales hasta que esto esté validado** (instrucción explícita del usuario:
+   no tocar las bases de producción ni de pruebas de la empresa).
+10. **Batch de los INSERT del ETL.** Hoy inserta fila por fila. En local no
+    importa (segundos), pero contra una BD remota son ~8.400 idas y vueltas por
+    mes. Si el RDS queda en la misma VPC deja de ser urgente; si alguna vez la
+    BD queda lejos, es lo primero que hay que arreglar.
+11. **`/anomalias` ignora en silencio los parámetros desconocidos.** Un
+    `?cedula=X` en vez de `?busqueda=X` no da error: devuelve la primera página
+    sin filtrar, como si el filtro se hubiera aplicado. Ya provocó una
+    confusión real durante las pruebas. Debe responder 422.
+12. **Los tres correos por audiencia** que hacía el flujo de n8n eliminado. El
+    payload sigue en `/informe/mensual`.
+13. **Migración a la API de SERPI** cuando exista: cambiar la fuente del ETL,
+    marcar `origen = 'API_SERPI'` y retirar `descargar_malla_serpi.py` (el RPA
+    deja de ser necesario). Nada más debería cambiar.
 
 ---
 
@@ -525,6 +707,17 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
   y luego `python motor_reglas.py` contra la malla de julio: debe seguir dando
   **386 hallazgos / 166 guardas**. Ese número es el contrato con el análisis
   manual de referencia.
+- **Tras tocar `api.py` o el `dashboard.html`, corre
+  `python test_api_identidad.py`.** Esa prueba SI necesita BD, y protege lo
+  unico del sistema que puede fallar sin que se note: que la identidad escrita
+  en el historial sea la verificada. Con `--con-escritura` cubre tambien el
+  camino de escritura (modifica una anomalia real y la restaura).
+- **Y tras tocar `dashboard.html`, regenera el informe autónomo**
+  (`python generar_informe.py --periodo 2026-07`). `generar_informe.py:69-107`
+  lo reutiliza sustituyendo texto **por coincidencia exacta** (`html.index` de
+  `async function pedir(...)` y de `function pedirToken(){`, más el HTML del
+  botón de identificarse). Renombrar o mover cualquiera de esos anclajes rompe
+  el informe, y el error no aparece hasta que alguien lo abre.
 - **Reglas como datos, no como código.** Cualquier umbral nuevo va a
   `reglas_anomalia`, no a un `if`.
 - **Trazabilidad ante todo.** Este sistema puede terminar sustentando una

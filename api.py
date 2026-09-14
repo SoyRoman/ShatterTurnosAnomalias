@@ -1,17 +1,26 @@
 """
 API de turnos y anomalias — puerto unico del sistema.
 
-Todo lo que consume estos datos (el dashboard, n8n, futuras integraciones)
-entra por aqui. Nadie mas abre conexiones a PostgreSQL: asi la logica de
-negocio no se reparte entre tres clientes distintos y hay un solo lugar
-donde auditar quien leyo y quien escribio.
+Todo lo que consume estos datos (el dashboard y futuras integraciones) entra
+por aqui. Nadie mas abre conexiones a PostgreSQL: asi la logica de negocio no
+se reparte entre varios clientes distintos y hay un solo lugar donde auditar
+quien leyo y quien escribio.
 
 Uso:
-    uvicorn api:app --host 0.0.0.0 --port 8000
+    uvicorn api:app --host 127.0.0.1 --port 8000
 
 Variables de entorno adicionales a las de .env:
-    API_TOKEN   Token compartido. Si esta definido se exige en todas las
-                peticiones via cabecera  X-API-Token.
+    API_TOKEN            Token compartido. Si esta definido se exige en todas
+                         las peticiones via cabecera  X-API-Token. Autentica al
+                         SISTEMA que llama, no a la persona.
+    MODO_IDENTIDAD       DECLARATIVA (default) o PROXY. Quien es la PERSONA.
+                         Ver el bloque de comentarios mas abajo: es la
+                         diferencia entre un rastro de auditoria confiable y
+                         uno que solo lo parece.
+    CABECERA_IDENTIDAD   En modo PROXY, de que cabecera se lee la identidad ya
+                         verificada. Default: Cf-Access-Authenticated-User-Email
+                         (Cloudflare Access). Para ALB+Cognito:
+                         x-amzn-oidc-identity.
 """
 
 import os
@@ -24,7 +33,7 @@ from typing import Literal, Optional
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from psycopg2.pool import SimpleConnectionPool
 from pydantic import BaseModel, Field
@@ -33,6 +42,38 @@ load_dotenv()
 
 RAIZ = os.path.dirname(os.path.abspath(__file__))
 API_TOKEN = os.environ.get('API_TOKEN')
+
+# ---------------------------------------------------------------------------
+# Identidad de la persona
+# ---------------------------------------------------------------------------
+# Dos modos, y la diferencia no es cosmetica:
+#
+#   DECLARATIVA  El cliente dice quien es en `X-Usuario` y se le cree. Sirve
+#                para operar en red interna cerrada y es el comportamiento
+#                historico. NO se debe usar expuesto.
+#   PROXY        La identidad la pone un proxy que ya autentico a la persona
+#                (Cloudflare Access, ALB+Cognito, el login de la empresa) en
+#                una cabecera que el cliente NO controla. `X-Usuario` se
+#                IGNORA por completo en este modo.
+#
+# Por que importa: `anomalias_historial` puede terminar sustentando una
+# respuesta ante el Ministerio del Trabajo. Con identidad declarativa expuesta,
+# cualquiera podria marcar una anomalia como JUSTIFICADA firmando con el nombre
+# de otro — y un historial que parece confiable y no lo es es peor que no tener
+# historial.
+#
+# El nombre de la cabecera es configurable a proposito: asi el codigo no queda
+# acoplado a un proveedor concreto y la decision de infraestructura
+# (Cloudflare vs ALB) no bloquea el desarrollo.
+MODOS_IDENTIDAD = ('DECLARATIVA', 'PROXY')
+MODO_IDENTIDAD = os.environ.get('MODO_IDENTIDAD', 'DECLARATIVA').upper()
+CABECERA_IDENTIDAD = os.environ.get(
+    'CABECERA_IDENTIDAD', 'Cf-Access-Authenticated-User-Email')
+
+if MODO_IDENTIDAD not in MODOS_IDENTIDAD:
+    raise SystemExit(
+        f"MODO_IDENTIDAD='{MODO_IDENTIDAD}' no es valido. "
+        f"Opciones: {', '.join(MODOS_IDENTIDAD)}.")
 
 _pool: Optional[SimpleConnectionPool] = None
 
@@ -50,6 +91,15 @@ async def ciclo_de_vida(app: FastAPI):
         print("ADVERTENCIA: API_TOKEN no esta definido. La API queda SIN "
               "autenticacion. No la expongas fuera de la red interna.",
               file=sys.stderr)
+    if MODO_IDENTIDAD == 'DECLARATIVA':
+        print("ADVERTENCIA: MODO_IDENTIDAD=DECLARATIVA. Se cree la cabecera "
+              "X-Usuario sin verificarla, asi que el historial de auditoria NO "
+              "impide suplantacion. Solo aceptable en red interna cerrada; "
+              "para exponer esto usa MODO_IDENTIDAD=PROXY detras de un proxy "
+              "que autentique de verdad.", file=sys.stderr)
+    else:
+        print(f"Identidad en modo PROXY: se lee de la cabecera "
+              f"'{CABECERA_IDENTIDAD}' y X-Usuario se ignora.", file=sys.stderr)
     yield
     if _pool:
         _pool.closeall()
@@ -66,14 +116,71 @@ app = FastAPI(
 def verificar_token(x_api_token: Optional[str] = Header(None)):
     """Token compartido, al estilo Secret Key de SERPI.
 
-    OJO: esto autentica al SISTEMA que llama (dashboard, n8n), no a la
-    PERSONA. La identidad de quien gestiona una anomalia viaja aparte en
-    `X-Usuario` y hoy es declarativa: sirve para atribuir en el historial,
-    no para impedir suplantacion. Antes de sacar esto de la red interna
-    hay que enganchar la autenticacion real de la empresa.
+    OJO: esto autentica al SISTEMA que llama (el dashboard), no a la PERSONA.
+    La identidad de quien gestiona una anomalia viaja aparte y la resuelve
+    `resolver_identidad` segun `MODO_IDENTIDAD`.
     """
     if API_TOKEN and x_api_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalido o ausente")
+
+
+def resolver_identidad(peticion: Request) -> str:
+    """Quien esta haciendo el cambio. Ver el bloque de MODO_IDENTIDAD arriba.
+
+    En modo PROXY, la ausencia de la cabecera es un 403 y NO se cae de vuelta a
+    `X-Usuario`. Ese fallback seria justo el agujero que este modo cierra:
+    bastaria con alcanzar la API sin pasar por el proxy para poder firmar como
+    cualquiera. Si esto devuelve 403 en produccion, el diagnostico es de red
+    (alguien llego directo al puerto), no de configuracion del cliente.
+
+    La confianza en una cabecera simple es aceptable porque la garantia viene
+    de la RED: la API escucha en 127.0.0.1 y el grupo de seguridad de la EC2 no
+    admite ningun ingreso, asi que el unico camino es el proxy. Si algun dia se
+    expone el puerto, hay que pasar a verificar el JWT firmado que emiten tanto
+    Cloudflare Access (`Cf-Access-Jwt-Assertion`) como ALB+Cognito
+    (`x-amzn-oidc-data`) — la cabecera plana dejaria de ser suficiente.
+    """
+    if MODO_IDENTIDAD == 'PROXY':
+        quien = (peticion.headers.get(CABECERA_IDENTIDAD) or '').strip()
+        if not quien:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Sin identidad verificada en '{CABECERA_IDENTIDAD}'. "
+                       "Esta peticion no paso por el proxy de autenticacion.")
+        return quien
+
+    quien = (peticion.headers.get('X-Usuario') or '').strip()
+    if not quien:
+        raise HTTPException(
+            status_code=422,
+            detail="Falta la cabecera X-Usuario: toda gestion debe quedar atribuida")
+    return quien
+
+
+def rechazar_parametros_desconocidos(*permitidos: str):
+    """Devuelve una dependencia que responde 422 ante un parametro no previsto.
+
+    FastAPI ignora en silencio lo que no declara, y eso ya causo una confusion
+    real: un `?cedula=X` en vez de `?busqueda=X` devolvia la primera pagina sin
+    filtrar, con apariencia de haber filtrado — o sea, un resultado que parece
+    ser de un guarda y es de otro. En una herramienta de cumplimiento, un
+    filtro que falla en silencio es peor que un error.
+    """
+    permitidos_set = frozenset(permitidos)
+
+    def verificar(peticion: Request):
+        sobrantes = sorted(set(peticion.query_params) - permitidos_set)
+        if sobrantes:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "mensaje": "Parametros no reconocidos; se habrian ignorado "
+                               "en silencio devolviendo resultados sin filtrar",
+                    "no_reconocidos": sobrantes,
+                    "validos": sorted(permitidos_set),
+                })
+
+    return verificar
 
 
 def consultar(sql: str, params=(), una=False):
@@ -112,9 +219,31 @@ def dashboard():
 
 @app.get("/salud")
 def salud():
-    """Healthcheck para n8n: confirma que la API y la BD responden."""
+    """Healthcheck: confirma que la API y la BD responden."""
     fila = consultar("SELECT count(*) AS n FROM anomalias", una=True)
     return {"estado": "ok", "anomalias": fila["n"]}
+
+
+@app.get("/identidad", dependencies=[Depends(verificar_token)])
+def identidad(peticion: Request):
+    """Quien soy, segun el modo de identidad configurado.
+
+    Existe para que el dashboard no tenga que adivinar: en modo PROXY toma el
+    nombre de aqui y esconde el boton de "identificarse" (pedirle el nombre a
+    alguien que ya inicio sesion es a la vez redundante y engañoso, porque
+    sugiere que ese nombre es el que se va a guardar cuando en realidad se
+    ignora). En modo DECLARATIVA devuelve `usuario: null` y el dashboard sigue
+    preguntando como siempre.
+
+    No usa `Depends(resolver_identidad)` a proposito: aqui la falta de
+    identidad es una respuesta valida que el dashboard necesita poder leer,
+    no un 403.
+    """
+    if MODO_IDENTIDAD == 'PROXY':
+        quien = (peticion.headers.get(CABECERA_IDENTIDAD) or '').strip() or None
+    else:
+        quien = None
+    return {"modo": MODO_IDENTIDAD, "usuario": quien}
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +275,12 @@ def clientes(periodo: Optional[str] = None, limite: int = Query(100, le=500)):
     return consultar(sql, params)
 
 
-@app.get("/anomalias", dependencies=[Depends(verificar_token)])
+@app.get("/anomalias", dependencies=[
+    Depends(verificar_token),
+    Depends(rechazar_parametros_desconocidos(
+        'periodo', 'severidad', 'naturaleza', 'responsable', 'estado', 'regla',
+        'cliente_id', 'busqueda', 'pagina', 'por_pagina')),
+])
 def anomalias(
     periodo: Optional[str] = None,
     severidad: Optional[str] = None,
@@ -263,7 +397,7 @@ class CambioAnomalia(BaseModel):
 def gestionar_anomalia(
     anomalia_id: int,
     cambio: CambioAnomalia,
-    x_usuario: str = Header(..., description="Quien realiza el cambio"),
+    quien: str = Depends(resolver_identidad),
 ):
     """Cambia el estado de una anomalia y deja rastro de quien y por que.
 
@@ -271,6 +405,10 @@ def gestionar_anomalia(
     si falla el registro de auditoria, no se aplica el cambio. Es la
     propiedad que exige la Circular 0040 — no puede haber una anomalia que
     cambio de estado sin que se sepa quien lo hizo.
+
+    `quien` NO llega como cabecera declarada a proposito: lo resuelve
+    `resolver_identidad`, que en modo PROXY exige una cabecera puesta por el
+    autenticador e ignora `X-Usuario`.
     """
     actual = consultar("SELECT estado FROM anomalias WHERE id = %s", (anomalia_id,), una=True)
     if not actual:
@@ -293,14 +431,14 @@ def gestionar_anomalia(
                           actualizado_por = %s
                     WHERE id = %s
                 RETURNING id, estado, nota, actualizado_en, actualizado_por""",
-                (cambio.estado, cambio.nota, x_usuario, anomalia_id),
+                (cambio.estado, cambio.nota, quien, anomalia_id),
             )
             fila = cur.fetchone()
             cur.execute(
                 """INSERT INTO anomalias_historial
                        (anomalia_id, estado_anterior, estado_nuevo, nota, usuario)
                    VALUES (%s, %s, %s, %s, %s)""",
-                (anomalia_id, actual['estado'], cambio.estado, cambio.nota, x_usuario),
+                (anomalia_id, actual['estado'], cambio.estado, cambio.nota, quien),
             )
         conn.commit()
         return fila

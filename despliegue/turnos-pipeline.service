@@ -1,0 +1,82 @@
+# Corrida diaria del pipeline. NO se habilita este servicio: lo dispara
+# turnos-pipeline.timer.
+#
+#   sudo cp despliegue/turnos-pipeline.* /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now turnos-pipeline.timer
+#
+# Por que systemd y no un cron dentro del contenedor:
+#   - los codigos de salida de pipeline_diario.py quedan visibles
+#     (`systemctl status`, `OnFailure=`); un cron en contenedor los tira a la
+#     basura y una corrida fallida se vuelve invisible
+#   - la bitacora va al journal, con rotacion y retencion ya resueltas
+#   - `Persistent=true` recupera la corrida si la maquina estaba apagada
+#   - no hay un segundo planificador que mantener dentro de la imagen
+
+[Unit]
+Description=Auditoria diaria de la malla de turnos (descarga SERPI + ETL + motor de reglas)
+Documentation=file:///opt/turnos/CLAUDE.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Cuenta de servicio dedicada, NO la de un empleado. Dos razones:
+#  1. si alguien se va de la empresa y se le desactiva la cuenta, la auditoria
+#     diaria no se puede caer con ella
+#  2. lo que este proceso escribe queda atribuido a un sistema, no a una
+#     persona que no tomo la decision
+# Crear con:
+#   sudo useradd --system --home /opt/turnos --shell /usr/sbin/nologin turnos
+#   sudo usermod -aG docker turnos
+# OJO: pertenecer al grupo `docker` equivale a root en esa maquina. Es
+# inevitable con Docker clasico; si eso no es aceptable para su politica,
+# la alternativa es Podman rootless.
+User=turnos
+Group=turnos
+WorkingDirectory=/opt/turnos
+
+# `run --rm` y no `start`: el pipeline no es un servicio, es un trabajo que
+# termina. Su codigo de salida es el del contenedor, y systemd lo propaga.
+ExecStart=/usr/bin/docker compose --profile manual run --rm pipeline
+
+# La descarga de dos meses contra SERPI puede tardar. El limite duro esta por
+# encima del peor caso (3 reintentos x 25 min + ETL + motor) para que systemd
+# no mate una corrida que todavia iba bien.
+TimeoutStartSec=2h
+
+# Sin reintentos de systemd: pipeline_diario.py ya reintenta lo unico que tiene
+# sentido reintentar (la descarga). Volver a lanzar el ETL a ciegas es
+# exactamente lo que no queremos.
+Restart=no
+
+# Si falla, avisar. Requiere turnos-pipeline-alerta@.service (opcional, ver
+# README): sin el, el fallo queda solo en el journal.
+# OnFailure=turnos-pipeline-alerta@%n.service
+
+# Endurecimiento. Este proceso maneja PII de 404 trabajadores y ademas se
+# conecta a un sitio externo con credenciales, asi que se le quita todo lo que
+# no necesita.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# La segunda ruta VA ENTRE COMILLAS: systemd separa esta lista por espacios y
+# sin ellas "Reportes" y "mensuales" se leerian como dos rutas distintas, el
+# arranque falla con "Failed to parse" y el timer queda muerto en silencio.
+ReadWritePaths=/opt/turnos/logs "/opt/turnos/Reportes mensuales"
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=turnos-pipeline
+
+[Install]
+# Vacio a proposito: este servicio no se habilita solo. Lo llama el .timer.

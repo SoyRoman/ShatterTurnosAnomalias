@@ -27,6 +27,29 @@ export/
 *.dump
 *.sql.gz
 
+# Mallas descargadas de SERPI por descargar_malla_serpi.py: PII de los guardas
+Reportes mensuales/
+
+# Respaldos y credenciales de la base de la empresa. OJO: aqui vive un dump de
+# varios GB con TODA la operacion (no solo turnos). `*.sql` no se puede ignorar
+# de forma global porque schema.sql y las vistas si se versionan, asi que la
+# carpeta entera queda excluida.
+Migracion/
+
+# Capturas de red (HAR) de SERPI: llevan cookies de sesion y tokens reales
+*.har
+
+# Documento de contexto de la API general de SERPI (uso interno, no del repo)
+CONTEXTO_API_SERPI.md
+
+# Archivo temporal de descargar_malla_serpi.py si falla a mitad de camino
+*.descarga_cruda
+
+# Estado en tiempo de ejecucion de pipeline_diario.py: bitacora rotativa y
+# candado contra corridas solapadas. La carpeta completa, no solo *.log, porque
+# el candado no tiene esa extension.
+logs/
+
 # Python
 __pycache__/
 *.py[cod]

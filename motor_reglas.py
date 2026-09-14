@@ -231,12 +231,25 @@ def detectar_jornada_diaria_excesiva(turnos, umbral_horas):
 
 def detectar_semana_excesiva(turnos, umbral_horas):
     """Ventana movil de cualquier 7 dias consecutivos con mas de
-    `umbral_horas`. Se reporta UN solo hallazgo por guarda para todo el
-    rango evaluado -- cuenta cuantas ventanas violatorias hubo en total y
-    referencia la de mas horas -- en vez de una fila por ventana o por
-    racha. Asi es como esta convencion la modela el analisis manual de
-    referencia (386 hallazgos de julio 2026): nunca hay mas de 1 fila por
-    guarda para esta regla."""
+    `umbral_horas`. Se reporta UN hallazgo por guarda Y POR MES -- cuenta
+    cuantas ventanas violatorias empezaron en ese mes y referencia la de mas
+    horas -- en vez de una fila por ventana o por racha. Asi es como modela
+    esta convencion el analisis manual de referencia (386 hallazgos de julio
+    2026): nunca hay mas de 1 fila por guarda y mes para esta regla.
+
+    Cada ventana pertenece al mes de su dia de INICIO (misma convencion en
+    detectar_sin_descanso_semanal y detectar_racha_sin_descanso).
+
+    OJO -- agrupar por mes NO es cosmetico, es obligatorio. La version
+    anterior agregaba sobre TODO el rango evaluado y devolvia una sola fila
+    por guarda. Con un solo mes cargado las dos cosas son identicas, por eso
+    la validacion de julio pasaba; pero al cargar varios meses la semana pico
+    se corria a otro mes, la `clave` cambiaba y la huella del mes anterior
+    DESAPARECIA. Como `marcar_resueltas` da por RESUELTA toda huella que ya
+    no aparece, el sistema le decia al usuario "tu correccion llego" sobre una
+    violacion que nadie corrigio. Verificado con julio+agosto+septiembre
+    cargados: se perdian 6 hallazgos de julio. No vuelvas a agregar sobre el
+    rango completo."""
     horas_por_dia = defaultdict(float)
     turnos_por_dia = defaultdict(list)
     for t in turnos:
@@ -247,36 +260,34 @@ def detectar_semana_excesiva(turnos, umbral_horas):
         return []
 
     d_min, d_max = min(horas_por_dia), max(horas_por_dia)
-    conteo = 0
-    max_horas = None
-    dia_max = None
-    ids_totales = set()
+    por_mes = {}
     d = d_min
     while d <= d_max:
         ventana = [d + timedelta(days=i) for i in range(7)]
         total = sum(horas_por_dia.get(dd, 0.0) for dd in ventana)
         if total > umbral_horas:
-            conteo += 1
+            mes = por_mes.setdefault(f"{d:%Y-%m}", {
+                'conteo': 0, 'max_horas': None, 'dia_max': None, 'ids': set()})
+            mes['conteo'] += 1
             for dd in ventana:
-                ids_totales.update(turnos_por_dia.get(dd, []))
-            if max_horas is None or total > max_horas:
-                max_horas, dia_max = total, d
+                mes['ids'].update(turnos_por_dia.get(dd, []))
+            if mes['max_horas'] is None or total > mes['max_horas']:
+                mes['max_horas'], mes['dia_max'] = total, d
         d += timedelta(days=1)
 
-    if conteo == 0:
-        return []
     return [{
-        # Es un hallazgo por guarda y por mes, asi que la clave es el periodo:
-        # si al recargar la malla la semana pico se corre de dia, sigue siendo
-        # la misma anomalia y no se duplica contra la que ya tenga ticket.
-        'clave': f"{dia_max:%Y-%m}",
-        'fecha_referencia': dia_max,
-        'turnos': sorted(ids_totales),
+        # La clave es el periodo: si al recargar la malla la semana pico se
+        # corre de dia dentro del mismo mes, sigue siendo la misma anomalia y
+        # no se duplica contra la que ya este en gestion.
+        'clave': clave,
+        'fecha_referencia': m['dia_max'],
+        'turnos': sorted(m['ids']),
         'detalle': (
-            f"{conteo} semana(s) movil(es) del mes superan el tope legal de "
-            f"{umbral_horas}h; la mas alta: {max_horas:.1f}h en semana que inicia el dia {dia_max.day}"
+            f"{m['conteo']} semana(s) movil(es) del mes superan el tope legal de "
+            f"{umbral_horas}h; la mas alta: {m['max_horas']:.1f}h en semana que "
+            f"inicia el dia {m['dia_max'].day}"
         ),
-    }]
+    } for clave, m in sorted(por_mes.items())]
 
 
 def _rachas_dias_trabajados(turnos):
@@ -324,36 +335,45 @@ def detectar_racha_sin_descanso(turnos, umbral_dias):
 
 def detectar_sin_descanso_semanal(turnos):
     """Cuenta cuantas ventanas de 7 dias calendario sin ningun dia de
-    descanso hubo en el mes (una racha de N>=7 dias consecutivos trabajados
-    contiene N-6 de esas ventanas) y reporta UN solo hallazgo por guarda
-    para todo el rango evaluado, igual que detectar_semana_excesiva. Aunque
-    la condicion de base es la misma racha que usa RACHA_SIN_DESCANSO
-    (Art. 172/175 CST: el descanso semanal es diferible hasta por 6 dias),
-    aqui se cuenta por ventana y se colapsa a 1 fila por guarda porque asi
-    la modela el analisis manual de referencia -- RACHA_SIN_DESCANSO en
-    cambio reporta una fila POR racha (ver esa funcion)."""
-    total_ventanas = 0
-    primera_racha = None
-    ids_totales = set()
+    descanso hubo (una racha de N>=7 dias consecutivos trabajados contiene
+    N-6 de esas ventanas) y reporta UN hallazgo por guarda Y POR MES, igual
+    que detectar_semana_excesiva. Aunque la condicion de base es la misma
+    racha que usa RACHA_SIN_DESCANSO (Art. 172/175 CST: el descanso semanal
+    es diferible hasta por 6 dias), aqui se cuenta por ventana y se colapsa a
+    1 fila por mes porque asi la modela el analisis manual de referencia --
+    RACHA_SIN_DESCANSO en cambio reporta una fila POR racha (ver esa funcion).
+
+    Cada ventana pertenece al mes de su dia de INICIO. Ver
+    detectar_semana_excesiva para por que agrupar por mes es obligatorio y no
+    cosmetico (una racha a caballo entre dos meses hacia desaparecer la huella
+    del mes anterior, y eso la marcaba RESUELTA sin que nadie corrigiera nada)."""
+    turnos_por_dia = defaultdict(list)
+    for t in turnos:
+        if t['categoria'] == 'TRABAJADO':
+            turnos_por_dia[t['fecha']].append(t['id'])
+
+    por_mes = {}
     for racha in _rachas_dias_trabajados(turnos):
         n_dias = (racha['fin'] - racha['inicio']).days + 1
-        if n_dias >= 7:
-            total_ventanas += n_dias - 6
-            ids_totales.update(racha['turnos'])
-            if primera_racha is None:
-                primera_racha = racha
+        for i in range(n_dias - 6):  # 0 iteraciones si la racha no llega a 7 dias
+            inicio_ventana = racha['inicio'] + timedelta(days=i)
+            mes = por_mes.setdefault(f"{inicio_ventana:%Y-%m}", {
+                'ventanas': 0, 'primera': None, 'ids': set()})
+            mes['ventanas'] += 1
+            for j in range(7):
+                mes['ids'].update(turnos_por_dia.get(inicio_ventana + timedelta(days=j), []))
+            if mes['primera'] is None or inicio_ventana < mes['primera']:
+                mes['primera'] = inicio_ventana
 
-    if total_ventanas == 0:
-        return []
     return [{
-        'clave': f"{primera_racha['inicio']:%Y-%m}",  # un hallazgo por guarda y mes
-        'fecha_referencia': primera_racha['inicio'],
-        'turnos': sorted(ids_totales),
+        'clave': clave,  # un hallazgo por guarda y mes
+        'fecha_referencia': m['primera'],
+        'turnos': sorted(m['ids']),
         'detalle': (
-            f"{total_ventanas} semana(s) movil(es) del mes sin ningun dia de descanso "
-            f"(Art. 172/175 CST); ej. semana que inicia el dia {primera_racha['inicio'].day}"
+            f"{m['ventanas']} semana(s) movil(es) del mes sin ningun dia de descanso "
+            f"(Art. 172/175 CST); ej. semana que inicia el dia {m['primera'].day}"
         ),
-    }]
+    } for clave, m in sorted(por_mes.items())]
 
 
 def detectar_descuadre_horas(fila):
