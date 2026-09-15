@@ -4,6 +4,10 @@ python-dotenv>=1.0
 fastapi>=0.115
 uvicorn[standard]>=0.30
 
+# Login propio: hash de claves. bcrypt es lento a proposito, lo que hace
+# inviable probar millones de claves contra un volcado de la base.
+bcrypt>=4.1
+
 # Solo para descargar_malla_serpi.py (RPA de descarga diaria mientras SERPI
 # no tenga API de turnos). Tras instalar, corre ademas:
 #   python -m playwright install chromium

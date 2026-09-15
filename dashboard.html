@@ -112,7 +112,7 @@
   <label class="sub">Periodo
     <select id="periodo" onchange="cargarTodo()"></select>
   </label>
-  <button onclick="identificarse()" id="btnUsuario">Identificarse</button>
+  <button id="btnUsuario" title="Sesión">…</button>
   <button onclick="window.print()">Imprimir</button>
 </header>
 
@@ -120,6 +120,7 @@
   <button class="activa" data-panel="gerencia" onclick="verPanel(this)">Gerencia</button>
   <button data-panel="programador" onclick="verPanel(this)">Programador<span class="cuenta" id="cuentaProg">0</span></button>
   <button data-panel="nomina" onclick="verPanel(this)">Nómina<span class="cuenta" id="cuentaNom">0</span></button>
+  <button data-panel="admin" id="navAdmin" hidden onclick="verPanel(this)">Cuentas</button>
 </nav>
 
 <main>
@@ -211,7 +212,74 @@
       guarda-puesto-mes. Puede diferir legítimamente de lo declarado (ausencias, novedades posteriores);
       el <strong>descuadre</strong> —que el total no cuadre con sus propias categorías— es el que siempre es un error.</p>
   </section>
+
+  <!-- ================= ADMINISTRACIÓN (solo ADMIN) ================= -->
+  <section id="admin" class="oculto">
+    <h2>Cuentas de acceso</h2>
+    <p class="nota">Tú creas la cuenta y le entregas la clave temporal a la persona.
+      El sistema la obliga a cambiarla al entrar, así que esa clave deja de servir
+      en cuanto la use — y a partir de ahí, lo que haga en el sistema queda
+      atribuido solo a ella.</p>
+
+    <div class="filtros">
+      <button class="primario" onclick="abrirNuevoUsuario()">Crear cuenta</button>
+      <button onclick="cargarUsuarios()">Actualizar</button>
+    </div>
+
+    <div class="panel"><table>
+      <thead><tr>
+        <th>Usuario</th><th>Nombre</th><th>Rol</th><th>Estado</th>
+        <th>Último ingreso</th><th class="num">Sesiones</th><th></th>
+      </tr></thead>
+      <tbody id="tablaUsuarios"><tr><td colspan="7" class="cargando">Cargando…</td></tr></tbody>
+    </table></div>
+
+    <p class="leyenda">Las cuentas se <strong>desactivan</strong>, nunca se borran: el
+      historial de auditoría seguiría apuntando a ellas, y hay que poder responder
+      quién hizo cada cambio. Desactivar cierra sus sesiones al instante.</p>
+
+    <h2>Bitácora de acceso</h2>
+    <p class="nota">Quién entró, quién lo intentó y falló. Responde una pregunta distinta
+      al historial de anomalías: aquel dice quién cambió un dato, este dice quién tuvo
+      acceso al sistema.</p>
+    <div class="panel"><table>
+      <thead><tr><th>Cuándo</th><th>Usuario</th><th>Evento</th><th>Detalle</th><th>IP</th></tr></thead>
+      <tbody id="tablaAccesos"><tr><td colspan="5" class="cargando">Cargando…</td></tr></tbody>
+    </table></div>
+  </section>
 </main>
+
+<!-- Crear cuenta / mostrar clave temporal -->
+<dialog id="modalUsuario">
+  <div class="modal-cab"><h3>Cuenta de acceso</h3></div>
+  <div class="modal-cuerpo">
+    <div id="nuFormulario">
+      <div class="campo"><label for="nuUsuario">Usuario</label>
+        <input id="nuUsuario" autocapitalize="none" spellcheck="false"
+               placeholder="ana.programadora">
+        <div class="detalle">Minúsculas, sin espacios. Es con lo que inicia sesión y
+          lo que queda en el historial de auditoría.</div></div>
+      <div class="campo"><label for="nuNombre">Nombre completo</label>
+        <input id="nuNombre" placeholder="Ana Programadora">
+        <div class="detalle">El nombre real: es lo que leerá quien revise el historial
+          dentro de seis meses.</div></div>
+      <div class="campo"><label for="nuCorreo">Correo (opcional)</label>
+        <input id="nuCorreo" type="email"></div>
+      <div class="campo"><label for="nuRol">Rol</label>
+        <select id="nuRol">
+          <option value="PROGRAMADOR">PROGRAMADOR — corrige la malla en SERPI</option>
+          <option value="NOMINA">NOMINA — descuadres de horas</option>
+          <option value="GERENCIA">GERENCIA — hallazgos estructurales</option>
+          <option value="ADMIN">ADMIN — además gestiona cuentas</option>
+        </select></div>
+    </div>
+    <div id="nuResultado"></div>
+  </div>
+  <div class="modal-pie">
+    <button onclick="document.getElementById('modalUsuario').close()">Cerrar</button>
+    <button class="primario" onclick="guardarNuevoUsuario()">Crear cuenta</button>
+  </div>
+</dialog>
 
 <!-- Modal de gestión -->
 <dialog id="modal">
@@ -246,12 +314,17 @@
 <script>
 const API = '';
 let TOKEN = localStorage.getItem('apiToken') || '';
-let USUARIO = localStorage.getItem('usuario') || '';
-// 'DECLARATIVA' (el nombre lo escribe la persona) o 'PROXY' (lo pone el
-// autenticador). Lo dice la API en /identidad; se asume lo primero hasta que
-// responda, que es el comportamiento seguro: si por algo falla esa consulta el
-// dashboard sigue enviando X-Usuario y la gestión no se rompe.
-let MODO_IDENTIDAD = 'DECLARATIVA';
+// Quién soy. Ya NO lo decide el navegador: lo dice /identidad a partir de la
+// sesión, y el servidor ignora cualquier cosa que el cliente mande al respecto.
+let USUARIO = '';
+let NOMBRE = '';
+let ROL = '';
+let ES_ADMIN = false;
+// Qué pestañas puede ver este rol. Lo dice el servidor en /identidad, derivado
+// de la MISMA tabla que autoriza las rutas: así el dashboard nunca ofrece una
+// pestaña que la API vaya a rechazar con 403.
+let PANELES = [];
+let MODO_IDENTIDAD = 'SESION';
 let anomaliaActiva = null;
 let temporizador = null;
 
@@ -264,8 +337,12 @@ function cabeceras(extra){
 }
 
 async function pedir(ruta, opciones){
-  const r = await fetch(API + ruta, Object.assign({headers: cabeceras()}, opciones||{}));
-  if (r.status === 401){ pedirToken(); throw new Error('No autorizado'); }
+  const r = await fetch(API + ruta, Object.assign(
+    {headers: cabeceras(), credentials: 'same-origin'}, opciones||{}));
+  // 401 = la sesión venció o la cerraron desde administración. Se vuelve al
+  // login en vez de mostrar un error: no hay nada que el usuario pueda hacer
+  // aquí, y quedarse en una página vacía confunde más que redirigir.
+  if (r.status === 401){ location.href = '/login'; throw new Error('Sesión vencida'); }
   if (!r.ok){
     let d; try { d = (await r.json()).detail; } catch(e){ d = r.statusText; }
     throw new Error(typeof d === 'string' ? d : JSON.stringify(d));
@@ -273,44 +350,44 @@ async function pedir(ruta, opciones){
   return r.json();
 }
 
-function pedirToken(){
-  const t = prompt('Esta API exige token (X-API-Token). Pégalo aquí:');
-  if (t){ TOKEN = t; localStorage.setItem('apiToken', t); cargarTodo(); }
-}
-
-function identificarse(){
-  if (MODO_IDENTIDAD === 'PROXY'){
-    alert('Tu identidad viene de tu inicio de sesión (' + USUARIO + ') y no se '
-        + 'puede cambiar aquí: es lo que hace que el historial de auditoría sea '
-        + 'confiable.');
-    return;
-  }
-  const n = prompt('Tu nombre (queda en el historial de cada anomalía que gestiones):', USUARIO);
-  if (n && n.trim()){
-    USUARIO = n.trim(); localStorage.setItem('usuario', USUARIO);
-    document.getElementById('btnUsuario').textContent = USUARIO;
-  }
+async function salir(){
+  try{ await fetch('/logout', {method:'POST', credentials:'same-origin'}); }
+  catch(e){ /* si la red falla igual conviene salir de la página */ }
+  location.href = '/login';
 }
 
 async function resolverIdentidad(){
   try{
     const r = await pedir('/identidad');
     MODO_IDENTIDAD = r.modo;
-    if (r.modo === 'PROXY'){
-      USUARIO = r.usuario || '';
-      // El nombre ya no es del navegador: si quedó uno guardado de la época
-      // declarativa, se borra para que nadie crea que sigue en uso.
-      localStorage.removeItem('usuario');
-      const btn = document.getElementById('btnUsuario');
-      if (btn){   // puede no existir: ver la guarda en iniciar()
-        btn.textContent = USUARIO || 'sesión no verificada';
-        btn.title = 'Identidad verificada por el inicio de sesión';
+    USUARIO = r.usuario || '';
+    NOMBRE = r.nombre || r.usuario || '';
+    ROL = r.rol || '';
+    ES_ADMIN = !!r.es_admin;
+
+    const btn = document.getElementById('btnUsuario');
+    if (btn){
+      if (MODO_IDENTIDAD === 'SESION'){
+        btn.textContent = NOMBRE + (ROL ? ' · ' + ROL.toLowerCase() : '');
+        btn.title = 'Sesión iniciada. Clic para salir.';
+        btn.onclick = salir;
+      } else {
+        // Modo declarativo (desarrollo local): no hay sesión que cerrar.
+        btn.textContent = 'sin sesión (modo local)';
+        btn.onclick = null;
       }
     }
+    // Esconder las pestañas ajenas NO es la protección —el servidor responde
+    // 403 igual—; es no ofrecer un botón que va a fallar.
+    PANELES = r.paneles || ['gerencia','programador','nomina'];
+    document.querySelectorAll('nav button[data-panel]').forEach(b => {
+      b.hidden = !PANELES.includes(b.dataset.panel);
+    });
+    // Que la pestaña activa por defecto sea la del rol: un PROGRAMADOR que
+    // abre el dashboard tiene que caer en su bandeja, no en una vacía.
+    if (PANELES.length && !PANELES.includes(panelActivo())) mostrarPanel(PANELES[0]);
   } catch(e){
-    // Una API vieja no tiene /identidad. Se sigue en modo declarativo, que es
-    // exactamente como se comportaba antes.
-    console.warn('No se pudo consultar /identidad; se asume modo declarativo.', e);
+    console.warn('No se pudo consultar /identidad.', e);
   }
 }
 
@@ -333,12 +410,17 @@ function panelDesdeHash(){
 }
 
 function mostrarPanel(nombre){
+  // Un enlace guardado (#ver-nomina) no puede abrir una bandeja ajena. No es la
+  // protección real —los datos los niega el servidor— pero evita mostrar una
+  // pestaña vacía que parece un error del sistema.
+  if (PANELES.length && !PANELES.includes(nombre)) nombre = PANELES[0];
   const btn = document.querySelector(`nav button[data-panel="${nombre}"]`);
   if (!btn) return;
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('activa'));
   btn.classList.add('activa');
   document.querySelectorAll('main section').forEach(s => s.classList.add('oculto'));
   document.getElementById(nombre).classList.remove('oculto');
+  if (nombre === 'admin'){ cargarUsuarios(); cargarAccesos(); }
 }
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
@@ -503,7 +585,6 @@ async function cargarNomina(){
 
 // ---------- Gestión (escritura) ----------
 async function abrirGestion(id){
-  if (!USUARIO){ identificarse(); if (!USUARIO) return; }
   const a = await pedir('/anomalias/' + id);
   anomaliaActiva = a;
   document.getElementById('mTitulo').textContent = a.regla.replaceAll('_',' ');
@@ -540,11 +621,12 @@ async function guardarGestion(){
     return;
   }
   try{
-    // X-Usuario solo en modo declarativo. En modo PROXY la API la ignora, y
-    // enviarla igual sugeriría que el navegador puede decidir quién firma.
+    // No se manda X-Usuario: en modo SESION el servidor la ignora y saca la
+    // identidad de la sesión. Enviarla sugeriría que el navegador puede decidir
+    // quién firma el cambio, que es justo lo que no puede hacer.
     await pedir('/anomalias/' + anomaliaActiva.id, {
       method: 'PATCH',
-      headers: MODO_IDENTIDAD === 'PROXY' ? cabeceras() : cabeceras({'X-Usuario': USUARIO}),
+      headers: MODO_IDENTIDAD === 'SESION' ? cabeceras() : cabeceras({'X-Usuario': USUARIO}),
       body: JSON.stringify({estado, nota: nota || null}),
     });
     document.getElementById('modal').close();
@@ -552,9 +634,154 @@ async function guardarGestion(){
   } catch(e){ alert('No se pudo guardar: ' + e.message); }
 }
 
+
+// ---------- Administración de cuentas (solo ADMIN) ----------
+
+const ROLES = ['ADMIN', 'PROGRAMADOR', 'NOMINA', 'GERENCIA'];
+
+async function cargarUsuarios(){
+  const cuerpo = document.getElementById('tablaUsuarios');
+  try{
+    const filas = await pedir('/usuarios');
+    cuerpo.innerHTML = filas.map(u => {
+      let estado = u.activo ? 'activo' : 'desactivado';
+      let clase = u.activo ? 'RESUELTA' : 'ABIERTA';
+      if (u.bloqueado){ estado = 'bloqueado'; clase = 'CRITICA'; }
+      else if (u.activo && u.debe_cambiar_clave){ estado = 'clave temporal'; clase = 'ALTA'; }
+      const yo = u.usuario === USUARIO;
+      return `<tr>
+        <td>${esc(u.usuario)}${yo ? ' <span class="eti BAJA">tú</span>' : ''}</td>
+        <td>${esc(u.nombre)}${u.correo ? `<div class="detalle">${esc(u.correo)}</div>` : ''}</td>
+        <td>
+          <select onchange="cambiarRol(${u.id}, this.value, '${esc(u.usuario)}')" ${yo ? 'disabled' : ''}>
+            ${ROLES.map(r => `<option value="${r}"${r === u.rol ? ' selected' : ''}>${r}</option>`).join('')}
+          </select>
+        </td>
+        <td><span class="eti ${clase}">${estado}</span></td>
+        <td>${u.ultimo_ingreso ? esc(String(u.ultimo_ingreso).slice(0,16).replace('T',' ')) : 'nunca'}</td>
+        <td class="num">${u.sesiones_activas}</td>
+        <td style="white-space:nowrap">
+          <button onclick="restablecerClave(${u.id}, '${esc(u.usuario)}')">Clave nueva</button>
+          ${yo ? '' : `<button onclick="cambiarEstado(${u.id}, ${!u.activo}, '${esc(u.usuario)}')">
+            ${u.activo ? 'Desactivar' : 'Activar'}</button>`}
+        </td></tr>`;
+    }).join('');
+  } catch(e){
+    cuerpo.innerHTML = `<tr><td colspan="7" class="vacio">${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function cargarAccesos(){
+  const cuerpo = document.getElementById('tablaAccesos');
+  try{
+    const filas = await pedir('/accesos?limite=40');
+    cuerpo.innerHTML = filas.length ? filas.map(a => `<tr>
+        <td>${esc(String(a.ocurrido_en).slice(0,16).replace('T',' '))}</td>
+        <td>${esc(a.usuario || '—')}</td>
+        <td><span class="eti ${a.evento === 'INGRESO' ? 'RESUELTA' :
+             (a.evento === 'FALLO' || a.evento === 'BLOQUEO') ? 'CRITICA' : 'ABIERTA'}">${esc(a.evento)}</span></td>
+        <td class="detalle">${esc(a.detalle || '')}</td>
+        <td>${esc(a.ip || '')}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="vacio">Sin registros todavía.</td></tr>';
+  } catch(e){
+    cuerpo.innerHTML = `<tr><td colspan="5" class="vacio">${esc(e.message)}</td></tr>`;
+  }
+}
+
+function abrirNuevoUsuario(){
+  document.getElementById('nuUsuario').value = '';
+  document.getElementById('nuNombre').value = '';
+  document.getElementById('nuCorreo').value = '';
+  document.getElementById('nuRol').value = 'PROGRAMADOR';
+  document.getElementById('nuResultado').innerHTML = '';
+  document.getElementById('nuFormulario').style.display = '';
+  document.getElementById('modalUsuario').showModal();
+}
+
+async function guardarNuevoUsuario(){
+  const datos = {
+    usuario: document.getElementById('nuUsuario').value.trim().toLowerCase(),
+    nombre: document.getElementById('nuNombre').value.trim(),
+    rol: document.getElementById('nuRol').value,
+  };
+  const correo = document.getElementById('nuCorreo').value.trim();
+  if (correo) datos.correo = correo;
+  if (!datos.usuario || !datos.nombre){
+    alert('El usuario y el nombre son obligatorios.');
+    return;
+  }
+  try{
+    const r = await pedir('/usuarios', {method:'POST', body: JSON.stringify(datos)});
+    // La clave se muestra UNA vez y no se puede volver a consultar: no se
+    // guarda en claro en ninguna parte. Por eso ocupa toda la pantalla en vez
+    // de ser un aviso que se pueda cerrar sin leer.
+    document.getElementById('nuFormulario').style.display = 'none';
+    document.getElementById('nuResultado').innerHTML = `
+      <div class="aviso">Anota esta clave ahora. No se puede volver a consultar.</div>
+      <p>Cuenta <strong>${esc(r.usuario)}</strong> creada para ${esc(r.nombre)} (${esc(r.rol)}).</p>
+      <p style="font-size:26px;font-weight:700;letter-spacing:.04em;margin:18px 0;
+                font-family:ui-monospace,Menlo,Consolas,monospace">${esc(r.clave_temporal)}</p>
+      <p class="detalle">${esc(r.aviso)}</p>`;
+    cargarUsuarios();
+  } catch(e){ alert(e.message); }
+}
+
+async function restablecerClave(id, usuario){
+  if (!confirm(`¿Generar una clave nueva para ${usuario}?\n\n`
+             + `Se cerrarán todas sus sesiones y tendrá que cambiarla al entrar.`)) return;
+  try{
+    const r = await pedir('/usuarios/' + id + '/clave', {method:'POST'});
+    document.getElementById('nuFormulario').style.display = 'none';
+    document.getElementById('nuResultado').innerHTML = `
+      <div class="aviso">Anota esta clave ahora. No se puede volver a consultar.</div>
+      <p>Clave nueva de <strong>${esc(r.usuario)}</strong>
+         (${r.sesiones_cerradas} sesión/es cerrada/s):</p>
+      <p style="font-size:26px;font-weight:700;letter-spacing:.04em;margin:18px 0;
+                font-family:ui-monospace,Menlo,Consolas,monospace">${esc(r.clave_temporal)}</p>
+      <p class="detalle">${esc(r.aviso)}</p>`;
+    document.getElementById('modalUsuario').showModal();
+    cargarUsuarios();
+  } catch(e){ alert(e.message); }
+}
+
+async function cambiarEstado(id, activar, usuario){
+  const texto = activar
+    ? `¿Devolverle el acceso a ${usuario}?`
+    : `¿Quitarle el acceso a ${usuario}?\n\nSe cerrarán sus sesiones al instante. `
+      + `La cuenta no se borra: el historial tiene que seguir apuntando a ella.`;
+  if (!confirm(texto)) return;
+  try{
+    await pedir('/usuarios/' + id, {method:'PATCH', body: JSON.stringify({activo: activar})});
+    cargarUsuarios(); cargarAccesos();
+  } catch(e){ alert(e.message); }
+}
+
+async function cambiarRol(id, rol, usuario){
+  if (!confirm(`¿Cambiar el rol de ${usuario} a ${rol}?\n\n`
+             + `Se cerrarán sus sesiones: si no, seguiría viendo su bandeja anterior.`)){
+    cargarUsuarios();
+    return;
+  }
+  try{
+    await pedir('/usuarios/' + id, {method:'PATCH', body: JSON.stringify({rol})});
+    cargarUsuarios();
+  } catch(e){ alert(e.message); cargarUsuarios(); }
+}
+
 // ---------- Arranque ----------
+function panelActivo(){
+  const b = document.querySelector('nav button.activa');
+  return b ? b.dataset.panel : null;
+}
+
 async function cargarTodo(){
-  try{ await Promise.all([cargarGerencia(), cargarProgramador(), cargarNomina()]); }
+  // Solo lo que el rol puede pedir. Llamar a /kpi siendo PROGRAMADOR daría 403
+  // y llenaría la consola de errores por un dato que además no va a ver.
+  const tareas = [];
+  if (PANELES.includes('gerencia'))    tareas.push(cargarGerencia());
+  if (PANELES.includes('programador')) tareas.push(cargarProgramador());
+  if (PANELES.includes('nomina'))      tareas.push(cargarNomina());
+  try{ await Promise.all(tareas); }
   catch(e){ console.error(e); }
 }
 

@@ -10,17 +10,14 @@ Uso:
     uvicorn api:app --host 127.0.0.1 --port 8000
 
 Variables de entorno adicionales a las de .env:
-    API_TOKEN            Token compartido. Si esta definido se exige en todas
-                         las peticiones via cabecera  X-API-Token. Autentica al
-                         SISTEMA que llama, no a la persona.
-    MODO_IDENTIDAD       DECLARATIVA (default) o PROXY. Quien es la PERSONA.
-                         Ver el bloque de comentarios mas abajo: es la
-                         diferencia entre un rastro de auditoria confiable y
-                         uno que solo lo parece.
-    CABECERA_IDENTIDAD   En modo PROXY, de que cabecera se lee la identidad ya
-                         verificada. Default: Cf-Access-Authenticated-User-Email
-                         (Cloudflare Access). Para ALB+Cognito:
-                         x-amzn-oidc-identity.
+    MODO_IDENTIDAD       SESION (default) o DECLARATIVA. Quien es la PERSONA.
+                         Ver el bloque de comentarios mas abajo.
+    HORAS_SESION         Duracion de la sesion (default 12).
+    COOKIE_SEGURA        1 (default) exige HTTPS para la cookie. Solo se pone
+                         en 0 para desarrollo local por HTTP.
+    API_TOKEN            Token compartido opcional para integraciones que no
+                         son un navegador. Autentica al SISTEMA, no a la
+                         persona: no sustituye el login.
 """
 
 import os
@@ -36,7 +33,10 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from psycopg2.pool import SimpleConnectionPool
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
+
+import autenticacion as auth
 
 load_dotenv()
 
@@ -46,34 +46,40 @@ API_TOKEN = os.environ.get('API_TOKEN')
 # ---------------------------------------------------------------------------
 # Identidad de la persona
 # ---------------------------------------------------------------------------
-# Dos modos, y la diferencia no es cosmetica:
+# Autenticacion PROPIA: usuarios, claves y sesiones viven en esta base y no
+# dependen de ningun proveedor externo (decision explicita, septiembre 2026).
+# Toda la logica esta en `autenticacion.py`; aqui solo se conecta a HTTP.
 #
-#   DECLARATIVA  El cliente dice quien es en `X-Usuario` y se le cree. Sirve
-#                para operar en red interna cerrada y es el comportamiento
-#                historico. NO se debe usar expuesto.
-#   PROXY        La identidad la pone un proxy que ya autentico a la persona
-#                (Cloudflare Access, ALB+Cognito, el login de la empresa) en
-#                una cabecera que el cliente NO controla. `X-Usuario` se
-#                IGNORA por completo en este modo.
+# Dos modos:
+#
+#   SESION       El usuario inicia sesion en /login y recibe una cookie de
+#                sesion. TODA ruta exige esa sesion. Es el modo normal.
+#   DECLARATIVA  Sin login: se cree la cabecera `X-Usuario`. Existe solo para
+#                desarrollo local y scripts; la API lo avisa al arrancar.
 #
 # Por que importa: `anomalias_historial` puede terminar sustentando una
 # respuesta ante el Ministerio del Trabajo. Con identidad declarativa expuesta,
 # cualquiera podria marcar una anomalia como JUSTIFICADA firmando con el nombre
 # de otro — y un historial que parece confiable y no lo es es peor que no tener
 # historial.
-#
-# El nombre de la cabecera es configurable a proposito: asi el codigo no queda
-# acoplado a un proveedor concreto y la decision de infraestructura
-# (Cloudflare vs ALB) no bloquea el desarrollo.
-MODOS_IDENTIDAD = ('DECLARATIVA', 'PROXY')
-MODO_IDENTIDAD = os.environ.get('MODO_IDENTIDAD', 'DECLARATIVA').upper()
-CABECERA_IDENTIDAD = os.environ.get(
-    'CABECERA_IDENTIDAD', 'Cf-Access-Authenticated-User-Email')
+MODOS_IDENTIDAD = ('SESION', 'DECLARATIVA')
+MODO_IDENTIDAD = os.environ.get('MODO_IDENTIDAD', 'SESION').upper()
 
 if MODO_IDENTIDAD not in MODOS_IDENTIDAD:
     raise SystemExit(
         f"MODO_IDENTIDAD='{MODO_IDENTIDAD}' no es valido. "
         f"Opciones: {', '.join(MODOS_IDENTIDAD)}.")
+
+# Rutas que NO exigen sesion. Deliberadamente cortas:
+#   /salud   lo consulta el healthcheck del contenedor, desde dentro, y no
+#            devuelve ningun dato personal (solo un conteo).
+#   /login   es la puerta; exigir sesion para entrar seria circular.
+RUTAS_LIBRES = frozenset({'/salud', '/login', '/favicon.ico'})
+
+# `Secure` en la cookie exige HTTPS. En local se sirve por HTTP, asi que se
+# apaga con COOKIE_SEGURA=0; en el servidor NUNCA debe apagarse: sin esto, la
+# cookie de sesion viaja en claro y cualquiera en la red la puede copiar.
+COOKIE_SEGURA = os.environ.get('COOKIE_SEGURA', '1') not in ('0', 'false', 'False')
 
 _pool: Optional[SimpleConnectionPool] = None
 
@@ -87,19 +93,28 @@ async def ciclo_de_vida(app: FastAPI):
         dbname=os.environ['DB_NAME'], user=os.environ['DB_USER'],
         password=os.environ['DB_PASSWORD'], sslmode=os.environ.get('DB_SSLMODE', 'prefer'),
     )
-    if not API_TOKEN:
-        print("ADVERTENCIA: API_TOKEN no esta definido. La API queda SIN "
-              "autenticacion. No la expongas fuera de la red interna.",
+    if not API_TOKEN and MODO_IDENTIDAD != 'SESION':
+        print("ADVERTENCIA: sin API_TOKEN y sin login. La API queda ABIERTA a "
+              "quien alcance el puerto. Solo para desarrollo local.",
               file=sys.stderr)
     if MODO_IDENTIDAD == 'DECLARATIVA':
-        print("ADVERTENCIA: MODO_IDENTIDAD=DECLARATIVA. Se cree la cabecera "
-              "X-Usuario sin verificarla, asi que el historial de auditoria NO "
-              "impide suplantacion. Solo aceptable en red interna cerrada; "
-              "para exponer esto usa MODO_IDENTIDAD=PROXY detras de un proxy "
-              "que autentique de verdad.", file=sys.stderr)
+        print("ADVERTENCIA: MODO_IDENTIDAD=DECLARATIVA. No hay login: se cree la "
+              "cabecera X-Usuario sin verificarla, asi que el historial de "
+              "auditoria NO impide suplantacion y CUALQUIERA que alcance el "
+              "puerto lee los datos. Solo para desarrollo local.", file=sys.stderr)
     else:
-        print(f"Identidad en modo PROXY: se lee de la cabecera "
-              f"'{CABECERA_IDENTIDAD}' y X-Usuario se ignora.", file=sys.stderr)
+        with _conexion() as cn:
+            with cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                hay_admin = auth.hay_algun_admin(cur)
+                n = auth.purgar_sesiones_vencidas(cur)
+            cn.commit()
+        print(f"Identidad en modo SESION. {n} sesion(es) vencida(s) purgada(s).",
+              file=sys.stderr)
+        if not hay_admin:
+            print("ADVERTENCIA: no hay ningun ADMIN activo, asi que nadie puede "
+                  "gestionar cuentas. Crea el primero con: "
+                  "python gestionar_usuarios.py crear --usuario <tu> "
+                  "--nombre 'Tu Nombre' --rol ADMIN", file=sys.stderr)
     yield
     if _pool:
         _pool.closeall()
@@ -113,41 +128,108 @@ app = FastAPI(
 )
 
 
-def verificar_token(x_api_token: Optional[str] = Header(None)):
-    """Token compartido, al estilo Secret Key de SERPI.
+def _conexion():
+    """Conexion cruda del pool, para usar con `with`.
 
-    OJO: esto autentica al SISTEMA que llama (el dashboard), no a la PERSONA.
-    La identidad de quien gestiona una anomalia viaja aparte y la resuelve
-    `resolver_identidad` segun `MODO_IDENTIDAD`.
+    `consultar`/`ejecutar` cubren el 95% de los casos, pero la autenticacion
+    necesita varias sentencias en UNA transaccion: validar la clave, abrir la
+    sesion y registrar el acceso tienen que confirmarse juntos o no confirmarse.
+    """
+    class _Ctx:
+        def __enter__(self):
+            self.cn = _pool.getconn()
+            return self.cn
+
+        def __exit__(self, *exc):
+            if exc[0]:
+                self.cn.rollback()
+            _pool.putconn(self.cn)
+            return False
+    return _Ctx()
+
+
+def _contexto(peticion: Request):
+    """IP y navegador, para la bitacora de accesos.
+
+    Se lee X-Forwarded-For porque en el servidor hay un proxy delante y, sin
+    esto, TODA la bitacora diria la IP del proxy. No es identificacion —una
+    cabecera la puede poner cualquiera—: es contexto para investigar un acceso
+    raro.
+    """
+    reenviada = (peticion.headers.get('x-forwarded-for') or '').split(',')[0].strip()
+    ip = reenviada or (peticion.client.host if peticion.client else None)
+    return ip, peticion.headers.get('user-agent')
+
+
+def verificar_token(x_api_token: Optional[str] = Header(None)):
+    """Token compartido opcional, para integraciones que no son un navegador.
+
+    Autentica al SISTEMA que llama, no a la PERSONA, asi que NO sustituye al
+    login: en modo SESION las rutas siguen exigiendo sesion aunque el token sea
+    correcto.
     """
     if API_TOKEN and x_api_token != API_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalido o ausente")
 
 
-def resolver_identidad(peticion: Request) -> str:
-    """Quien esta haciendo el cambio. Ver el bloque de MODO_IDENTIDAD arriba.
+def sesion_actual(peticion: Request):
+    """Devuelve el usuario de la sesion, o None. No lanza."""
+    if MODO_IDENTIDAD != 'SESION':
+        return None
+    token = peticion.cookies.get(auth.NOMBRE_COOKIE)
+    if not token:
+        return None
+    with _conexion() as cn:
+        with cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            fila = auth.sesion_valida(cur, token)
+        cn.commit()
+    return fila
 
-    En modo PROXY, la ausencia de la cabecera es un 403 y NO se cae de vuelta a
-    `X-Usuario`. Ese fallback seria justo el agujero que este modo cierra:
-    bastaria con alcanzar la API sin pasar por el proxy para poder firmar como
-    cualquiera. Si esto devuelve 403 en produccion, el diagnostico es de red
-    (alguien llego directo al puerto), no de configuracion del cliente.
 
-    La confianza en una cabecera simple es aceptable porque la garantia viene
-    de la RED: la API escucha en 127.0.0.1 y el grupo de seguridad de la EC2 no
-    admite ningun ingreso, asi que el unico camino es el proxy. Si algun dia se
-    expone el puerto, hay que pasar a verificar el JWT firmado que emiten tanto
-    Cloudflare Access (`Cf-Access-Jwt-Assertion`) como ALB+Cognito
-    (`x-amzn-oidc-data`) — la cabecera plana dejaria de ser suficiente.
+def exigir_sesion(peticion: Request):
+    """Dependencia GLOBAL: ninguna ruta se sirve sin sesion valida.
+
+    Es global y no ruta por ruta a proposito. Con `dependencies=[...]` en cada
+    decorador, agregar un endpoint nuevo y olvidar la dependencia lo deja
+    abierto — y nada falla, asi que nadie se entera. Aqui el olvido es
+    imposible: lo que no este en RUTAS_LIBRES exige sesion.
     """
-    if MODO_IDENTIDAD == 'PROXY':
-        quien = (peticion.headers.get(CABECERA_IDENTIDAD) or '').strip()
-        if not quien:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Sin identidad verificada en '{CABECERA_IDENTIDAD}'. "
-                       "Esta peticion no paso por el proxy de autenticacion.")
-        return quien
+    if MODO_IDENTIDAD != 'SESION':
+        return None
+    fila = sesion_actual(peticion)
+    if not fila:
+        raise HTTPException(status_code=401, detail="Sesion no iniciada o vencida")
+    return fila
+
+
+def exigir_admin(usuario=Depends(exigir_sesion)):
+    """Solo ADMIN gestiona cuentas."""
+    if MODO_IDENTIDAD != 'SESION':
+        return None
+    if usuario['rol'] != 'ADMIN':
+        raise HTTPException(
+            status_code=403,
+            detail="Solo un usuario con rol ADMIN puede gestionar cuentas")
+    return usuario
+
+
+def resolver_identidad(peticion: Request) -> str:
+    """Quien esta haciendo el cambio; es lo que queda escrito en el historial.
+
+    En modo SESION sale de la sesion verificada y **no hay forma de
+    sobreescribirlo desde el cliente**: `X-Usuario` se ignora por completo.
+    Aceptar esa cabecera como alternativa seria el agujero que todo esto cierra
+    — bastaria con enviarla para firmar como cualquiera.
+
+    Se guarda el `usuario` y no el nombre para mostrar: el nombre puede
+    cambiar (correcciones, matrimonio) y el historial debe seguir apuntando a
+    la misma cuenta.
+    """
+    if MODO_IDENTIDAD == 'SESION':
+        fila = sesion_actual(peticion)
+        if not fila:
+            raise HTTPException(status_code=401, detail="Sesion no iniciada o vencida")
+        return fila['usuario']
 
     quien = (peticion.headers.get('X-Usuario') or '').strip()
     if not quien:
@@ -155,6 +237,297 @@ def resolver_identidad(peticion: Request) -> str:
             status_code=422,
             detail="Falta la cabecera X-Usuario: toda gestion debe quedar atribuida")
     return quien
+
+
+# ---------------------------------------------------------------------------
+# Autorizacion por URL
+# ---------------------------------------------------------------------------
+# Que ruta puede tocar cada rol. Es una TABLA y no `if`s repartidos por los
+# endpoints, por la misma razon por la que el muro es un middleware: lo que se
+# declara en un solo sitio se puede auditar de un vistazo, y lo que se reparte
+# se olvida.
+#
+# Criterio: cada audiencia alcanza SU bandeja y nada mas. GERENCIA ve todo lo
+# operativo porque su panel es el panorama completo; ADMIN suma la gestion de
+# cuentas y la ejecucion del pipeline.
+#
+# FALLA CERRADO: una ruta que no este aqui se niega a todo el mundo (ver
+# `roles_de_ruta`). Es deliberado — agregar un endpoint y olvidar clasificarlo
+# no puede dejarlo accesible en silencio.
+
+_TODOS = frozenset(auth.ROLES)
+_MANDO = frozenset({'ADMIN', 'GERENCIA'})
+
+PERMISOS = {
+    # Comunes: la cascara del dashboard y lo que necesita cualquiera para
+    # operar. Ninguna devuelve datos de un guarda.
+    '/':                 _TODOS,
+    '/identidad':        _TODOS,
+    '/logout':           _TODOS,
+    '/cambiar-clave':    _TODOS,
+    '/periodos':         _TODOS,   # el selector de mes lo usan las tres bandejas
+    '/reglas':           _TODOS,   # catalogo normativo, sin PII
+
+    # Bandeja del programador: hallazgos puntuales.
+    '/anomalias':        _MANDO | {'PROGRAMADOR'},
+
+    # Bandeja de gerencia: panorama, clientes y hallazgos estructurales.
+    '/kpi':              _MANDO,
+    '/clientes':         _MANDO,
+    '/estructural':      _MANDO,
+    '/informe/mensual':  _MANDO,
+
+    # Bandeja de nomina: descuadres de horas.
+    '/nomina':           _MANDO | {'NOMINA'},
+
+    # Solo ADMIN. `/pipeline/ejecutar` recarga la base entera y recibe la ruta
+    # del archivo en la peticion: no es una consulta, es una operacion de
+    # mantenimiento.
+    '/pipeline/ejecutar': frozenset({'ADMIN'}),
+    '/usuarios':          frozenset({'ADMIN'}),
+    '/accesos':           frozenset({'ADMIN'}),
+
+    # La documentacion interactiva describe TODA la superficie de la API,
+    # incluidas las rutas de administracion. No hay razon para que la vea quien
+    # no puede usarlas.
+    '/docs':             frozenset({'ADMIN'}),
+    '/redoc':            frozenset({'ADMIN'}),
+    '/openapi.json':     frozenset({'ADMIN'}),
+}
+
+# Rutas con parametro. El middleware ve el camino concreto (`/anomalias/4247`),
+# asi que hay que resolverlas por prefijo. El orden importa: el primero que
+# coincida gana, y los mas especificos van primero.
+PERMISOS_PREFIJO = (
+    ('/usuarios/',  frozenset({'ADMIN'})),
+    # El detalle de una anomalia y su gestion los alcanzan las tres audiencias:
+    # cada una llega desde su propia bandeja, y quien puede ver un hallazgo
+    # tiene que poder justificarlo.
+    ('/anomalias/', _TODOS),
+)
+
+
+# Que pestana del dashboard corresponde a cada ruta representativa. Se deriva de
+# PERMISOS en vez de repetir la lista de roles en el JavaScript: con dos tablas,
+# tarde o temprano uno cambia y el otro no, y el dashboard ofreceria una pestana
+# que el servidor va a rechazar.
+PANELES = {
+    'gerencia':    '/kpi',
+    'programador': '/anomalias',
+    'nomina':      '/nomina',
+    'admin':       '/usuarios',
+}
+
+
+def paneles_de_rol(rol: str):
+    return [panel for panel, ruta in PANELES.items() if rol in PERMISOS[ruta]]
+
+
+def roles_de_ruta(ruta: str):
+    """Roles admitidos para una ruta, o None si no esta clasificada.
+
+    `None` significa denegar. Una ruta nueva sin entrada en la tabla no queda
+    accesible por descuido: deja de funcionar, que es el fallo correcto.
+    """
+    if ruta in PERMISOS:
+        return PERMISOS[ruta]
+    for prefijo, roles in PERMISOS_PREFIJO:
+        if ruta.startswith(prefijo):
+            return roles
+    return None
+
+
+@app.middleware("http")
+async def muro_de_sesion(peticion: Request, siguiente):
+    """Cierra TODA la aplicacion, no solo las rutas declaradas.
+
+    Un `Depends` global protege las rutas de la API, pero no cubre la pagina
+    del dashboard ni la documentacion automatica. Sin este muro, `/docs` y
+    `/openapi.json` seguirian publicando la superficie completa de la API a
+    cualquiera que alcance el puerto.
+
+    A un navegador se le responde con una redireccion a /login en vez de un 401
+    crudo; a una peticion de datos (fetch/XHR), con 401, para que el JS lo
+    pueda manejar.
+    """
+    ruta = peticion.url.path
+    if MODO_IDENTIDAD != 'SESION' or ruta in RUTAS_LIBRES:
+        return await siguiente(peticion)
+
+    usuario = sesion_actual(peticion)
+    if not usuario:
+        acepta = peticion.headers.get('accept', '')
+        es_navegacion = 'text/html' in acepta and peticion.method == 'GET'
+        if es_navegacion:
+            return RedirectResponse('/login', status_code=303)
+        return JSONResponse({"detail": "Sesion no iniciada o vencida"}, status_code=401)
+
+    # Hay sesion; ahora, si ESTA ruta le corresponde a ESE rol.
+    permitidos = roles_de_ruta(ruta)
+    if permitidos is None:
+        # Ruta sin clasificar. Puede ser un endpoint nuevo que nadie asigno, o
+        # sencillamente una URL que no existe. En ambos casos se niega: no
+        # distinguirlos ademas evita confirmar que rutas existen.
+        return JSONResponse(
+            {"detail": "Ruta no disponible"}, status_code=404)
+
+    if usuario['rol'] not in permitidos:
+        return JSONResponse(
+            {"detail": f"Tu rol ({usuario['rol']}) no tiene acceso a esta seccion"},
+            status_code=403)
+
+    return await siguiente(peticion)
+
+
+# ---------------------------------------------------------------------------
+# Login y sesion
+# ---------------------------------------------------------------------------
+
+class Credenciales(BaseModel):
+    usuario: str = Field(..., max_length=40)
+    clave: str = Field(..., max_length=200)
+
+
+class CambioClave(BaseModel):
+    clave_actual: str = Field(..., max_length=200)
+    clave_nueva: str = Field(..., max_length=200)
+
+
+@app.get("/login", include_in_schema=False)
+def pagina_login():
+    return FileResponse(os.path.join(RAIZ, "login.html"))
+
+
+@app.post("/login")
+def iniciar_sesion(credenciales: Credenciales, peticion: Request):
+    """Valida la clave y abre sesion.
+
+    El mensaje de error es el MISMO para usuario inexistente y clave incorrecta.
+    Distinguirlos le confirmaria a un atacante que cuentas existen, que es el
+    primer paso para dirigir la fuerza bruta contra las que si.
+    """
+    if MODO_IDENTIDAD != 'SESION':
+        raise HTTPException(status_code=404, detail="El login no esta activo en este modo")
+
+    ip, agente = _contexto(peticion)
+    generico = "Usuario o clave incorrectos"
+    nombre = auth.normalizar_usuario(credenciales.usuario)
+
+    with _conexion() as cn:
+        with cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            fila = auth.buscar_usuario(cur, nombre)
+
+            if not fila or not fila['activo']:
+                # Se registra igual: un intento contra una cuenta inexistente o
+                # desactivada es informacion util (alguien probando nombres).
+                auth.registrar_acceso(cur, nombre, 'FALLO',
+                                      'cuenta inexistente o desactivada', ip, agente)
+                cn.commit()
+                raise HTTPException(status_code=401, detail=generico)
+
+            if auth.esta_bloqueado(fila):
+                auth.registrar_acceso(cur, nombre, 'FALLO',
+                                      'intento sobre cuenta bloqueada', ip, agente)
+                cn.commit()
+                raise HTTPException(
+                    status_code=429,
+                    detail="Cuenta bloqueada temporalmente por intentos fallidos. "
+                           "Espera unos minutos o pide a un administrador que la desbloquee.")
+
+            if not auth.verificar_clave(credenciales.clave, fila['hash_clave']):
+                bloqueada = auth.anotar_fallo(cur, fila, ip, agente)
+                cn.commit()
+                if bloqueada:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Demasiados intentos. Cuenta bloqueada "
+                               f"{auth.MINUTOS_BLOQUEO} minutos.")
+                raise HTTPException(status_code=401, detail=generico)
+
+            token = auth.abrir_sesion(cur, fila['id'], ip, agente)
+            auth.registrar_acceso(cur, fila['usuario'], 'INGRESO', None, ip, agente)
+            cuerpo = {
+                "usuario": fila['usuario'],
+                "nombre": fila['nombre'],
+                "rol": fila['rol'],
+                "debe_cambiar_clave": fila['debe_cambiar_clave'],
+            }
+        cn.commit()
+
+    respuesta = JSONResponse(cuerpo)
+    respuesta.set_cookie(
+        auth.NOMBRE_COOKIE, token,
+        max_age=auth.HORAS_SESION * 3600,
+        # httponly: el JS de la pagina no puede leerla, asi que un XSS no se
+        # lleva la sesion.
+        httponly=True,
+        # secure: solo viaja por HTTPS. En el servidor es obligatorio.
+        secure=COOKIE_SEGURA,
+        # samesite=lax: el navegador no la envia en peticiones que origina otro
+        # sitio, que es lo que hace un CSRF.
+        samesite="lax",
+        path="/",
+    )
+    return respuesta
+
+
+@app.post("/logout")
+def cerrar_sesion_actual(peticion: Request):
+    ip, agente = _contexto(peticion)
+    token = peticion.cookies.get(auth.NOMBRE_COOKIE)
+    with _conexion() as cn:
+        with cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            fila = auth.sesion_valida(cur, token) if token else None
+            auth.cerrar_sesion(cur, token)
+            if fila:
+                auth.registrar_acceso(cur, fila['usuario'], 'SALIDA', None, ip, agente)
+        cn.commit()
+    respuesta = JSONResponse({"ok": True})
+    respuesta.delete_cookie(auth.NOMBRE_COOKIE, path="/")
+    return respuesta
+
+
+@app.post("/cambiar-clave")
+def cambiar_mi_clave(datos: CambioClave, peticion: Request,
+                     usuario=Depends(exigir_sesion)):
+    """Cambio de clave por el propio usuario.
+
+    Exige la clave actual aunque ya haya sesion: si alguien deja el equipo
+    desbloqueado, no debe poder cambiarle la clave y quedarse con la cuenta.
+    """
+    if MODO_IDENTIDAD != 'SESION':
+        raise HTTPException(status_code=404, detail="No aplica en este modo")
+
+    motivo = auth.validar_clave(datos.clave_nueva)
+    if motivo:
+        raise HTTPException(status_code=422, detail=motivo)
+    if datos.clave_nueva == datos.clave_actual:
+        raise HTTPException(status_code=422, detail="La clave nueva debe ser distinta")
+
+    ip, agente = _contexto(peticion)
+    token_actual = peticion.cookies.get(auth.NOMBRE_COOKIE)
+
+    with _conexion() as cn:
+        with cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            fila = auth.buscar_usuario(cur, usuario['usuario'])
+            if not auth.verificar_clave(datos.clave_actual, fila['hash_clave']):
+                auth.registrar_acceso(cur, fila['usuario'], 'FALLO',
+                                      'clave actual incorrecta al cambiarla', ip, agente)
+                cn.commit()
+                raise HTTPException(status_code=401, detail="La clave actual no coincide")
+
+            auth.cambiar_clave(cur, fila['id'], datos.clave_nueva)
+            # Cerrar las demas sesiones: si la clave se cambia porque se filtro,
+            # dejar vivas las otras sesiones haria inutil el cambio. La actual
+            # se conserva para no expulsar a quien acaba de cambiarla.
+            cur.execute("""DELETE FROM sesiones
+                            WHERE usuario_id = %s AND token_hash <> %s""",
+                        (fila['id'], auth.hash_token(token_actual)))
+            otras = cur.rowcount
+            auth.registrar_acceso(cur, fila['usuario'], 'CLAVE_CAMBIADA',
+                                  'cambiada por el propio usuario', ip, agente)
+        cn.commit()
+    return {"ok": True, "otras_sesiones_cerradas": otras}
 
 
 def rechazar_parametros_desconocidos(*permitidos: str):
@@ -224,26 +597,36 @@ def salud():
     return {"estado": "ok", "anomalias": fila["n"]}
 
 
-@app.get("/identidad", dependencies=[Depends(verificar_token)])
+@app.get("/identidad")
 def identidad(peticion: Request):
-    """Quien soy, segun el modo de identidad configurado.
+    """Quien soy. Lo consulta el dashboard al cargar.
 
-    Existe para que el dashboard no tenga que adivinar: en modo PROXY toma el
-    nombre de aqui y esconde el boton de "identificarse" (pedirle el nombre a
-    alguien que ya inicio sesion es a la vez redundante y engañoso, porque
-    sugiere que ese nombre es el que se va a guardar cuando en realidad se
-    ignora). En modo DECLARATIVA devuelve `usuario: null` y el dashboard sigue
-    preguntando como siempre.
+    En modo SESION devuelve la cuenta de la sesion, su rol y si todavia debe
+    cambiar la clave temporal. El dashboard lo usa para saludar por nombre,
+    mostrar el boton de salir, decidir si ensena la pestana de administracion y
+    forzar el cambio de clave cuando toca.
 
-    No usa `Depends(resolver_identidad)` a proposito: aqui la falta de
-    identidad es una respuesta valida que el dashboard necesita poder leer,
-    no un 403.
+    No usa `Depends(exigir_sesion)` a proposito: aqui "no hay sesion" es una
+    respuesta valida que el cliente necesita poder leer. Igual esta protegida,
+    porque el middleware ya filtro la peticion antes de llegar aqui.
     """
-    if MODO_IDENTIDAD == 'PROXY':
-        quien = (peticion.headers.get(CABECERA_IDENTIDAD) or '').strip() or None
-    else:
-        quien = None
-    return {"modo": MODO_IDENTIDAD, "usuario": quien}
+    fila = sesion_actual(peticion)
+    if fila:
+        return {
+            "modo": MODO_IDENTIDAD,
+            "usuario": fila['usuario'],
+            "nombre": fila['nombre'],
+            "rol": fila['rol'],
+            "debe_cambiar_clave": fila['debe_cambiar_clave'],
+            "es_admin": fila['rol'] == 'ADMIN',
+            # Que pestanas mostrar. Sale de la MISMA tabla que autoriza las
+            # rutas, asi que el dashboard nunca ofrece algo que el servidor
+            # vaya a rechazar.
+            "paneles": paneles_de_rol(fila['rol']),
+        }
+    return {"modo": MODO_IDENTIDAD, "usuario": None, "nombre": None,
+            "rol": None, "debe_cambiar_clave": False, "es_admin": False,
+            "paneles": list(PANELES)}
 
 
 # ---------------------------------------------------------------------------
@@ -407,8 +790,8 @@ def gestionar_anomalia(
     cambio de estado sin que se sepa quien lo hizo.
 
     `quien` NO llega como cabecera declarada a proposito: lo resuelve
-    `resolver_identidad`, que en modo PROXY exige una cabecera puesta por el
-    autenticador e ignora `X-Usuario`.
+    `resolver_identidad`, que en modo SESION lo saca de la sesion verificada e
+    ignora `X-Usuario`. Asi el cliente no puede decidir quien firma el cambio.
     """
     actual = consultar("SELECT estado FROM anomalias WHERE id = %s", (anomalia_id,), una=True)
     if not actual:
@@ -539,3 +922,197 @@ def informe_mensual(periodo: str):
             (periodo,),
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Administracion de cuentas (solo ADMIN)
+# ---------------------------------------------------------------------------
+# Quien tiene rol ADMIN crea las cuentas y se las entrega a las personas que
+# deben entrar. Las mismas operaciones estan en `gestionar_usuarios.py`, que es
+# lo que rompe el huevo-gallina de la primera cuenta.
+
+class UsuarioNuevo(BaseModel):
+    usuario: str = Field(..., max_length=40)
+    nombre: str = Field(..., min_length=2, max_length=120)
+    rol: Literal['ADMIN', 'PROGRAMADOR', 'NOMINA', 'GERENCIA']
+    correo: Optional[str] = Field(None, max_length=200)
+
+
+class CambioUsuario(BaseModel):
+    """Todos opcionales: se aplica solo lo que venga."""
+    nombre: Optional[str] = Field(None, min_length=2, max_length=120)
+    correo: Optional[str] = Field(None, max_length=200)
+    rol: Optional[Literal['ADMIN', 'PROGRAMADOR', 'NOMINA', 'GERENCIA']] = None
+    activo: Optional[bool] = None
+
+
+@app.get("/usuarios")
+def listar_usuarios(admin=Depends(exigir_admin)):
+    return consultar("SELECT * FROM vw_usuarios")
+
+
+@app.post("/usuarios", status_code=201)
+def crear_usuario_nuevo(datos: UsuarioNuevo, peticion: Request,
+                        admin=Depends(exigir_admin)):
+    """Crea la cuenta y devuelve una clave temporal, UNA sola vez.
+
+    La clave no se guarda en claro ni se puede volver a consultar: si se
+    pierde, se restablece. Es la misma razon por la que no hay un endpoint que
+    liste claves — no existe nada que listar.
+    """
+    nombre_usuario = auth.normalizar_usuario(datos.usuario)
+    motivo = auth.validar_usuario(nombre_usuario)
+    if motivo:
+        raise HTTPException(status_code=422, detail=motivo)
+
+    clave = auth.clave_temporal()
+    ip, agente = _contexto(peticion)
+
+    with _conexion() as cn:
+        with cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if auth.buscar_usuario(cur, nombre_usuario):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Ya existe una cuenta '{nombre_usuario}'. Si esta "
+                           "desactivada, reactivala en vez de crear otra: dos "
+                           "cuentas para una persona parten su historial.")
+            fila = auth.crear_usuario(
+                cur, nombre_usuario, datos.nombre, datos.rol, clave,
+                correo=datos.correo, creado_por=admin['usuario'])
+            auth.registrar_acceso(
+                cur, nombre_usuario, 'CLAVE_CAMBIADA',
+                f"cuenta creada por {admin['usuario']} con rol {datos.rol}", ip, agente)
+        cn.commit()
+
+    return {
+        "usuario": fila['usuario'],
+        "nombre": datos.nombre,
+        "rol": fila['rol'],
+        "clave_temporal": clave,
+        "aviso": ("Entregasela a la persona por un medio seguro. El sistema le "
+                  "exigira cambiarla al entrar, asi que deja de servir en cuanto "
+                  "la use. Esta clave no se puede volver a consultar."),
+    }
+
+
+@app.patch("/usuarios/{usuario_id}")
+def modificar_usuario(usuario_id: int, cambio: CambioUsuario, peticion: Request,
+                      admin=Depends(exigir_admin)):
+    """Cambia nombre, correo, rol o estado.
+
+    Dos salvaguardas que no son opcionales:
+
+    - **No se puede quitar el ultimo ADMIN activo.** Sin ADMIN nadie puede
+      gestionar cuentas, y recuperarlo exige entrar a la base por fuera de la
+      aplicacion. Aplica tanto a desactivarlo como a bajarle el rol.
+    - **Un ADMIN no puede desactivarse ni degradarse a si mismo** por accidente
+      en dos clics. Que lo haga otro ADMIN, que ademas deja rastro cruzado.
+    """
+    campos, valores = [], []
+    for col in ('nombre', 'correo', 'rol', 'activo'):
+        valor = getattr(cambio, col)
+        if valor is not None:
+            campos.append(f"{col} = %s")
+            valores.append(valor)
+    if not campos:
+        raise HTTPException(status_code=422, detail="No hay nada que cambiar")
+
+    ip, agente = _contexto(peticion)
+
+    with _conexion() as cn:
+        with cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, usuario, rol, activo FROM usuarios WHERE id = %s",
+                        (usuario_id,))
+            actual = cur.fetchone()
+            if not actual:
+                raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+            pierde_admin = (actual['rol'] == 'ADMIN' and
+                            (cambio.activo is False or
+                             (cambio.rol is not None and cambio.rol != 'ADMIN')))
+            if pierde_admin:
+                if actual['id'] == admin['id']:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="No puedes quitarte a ti mismo el rol ADMIN ni "
+                               "desactivarte. Pideselo a otro administrador.")
+                cur.execute("""SELECT count(*) n FROM usuarios
+                                WHERE rol = 'ADMIN' AND activo AND id <> %s""",
+                            (usuario_id,))
+                if cur.fetchone()['n'] == 0:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Es el unico ADMIN activo. El sistema quedaria sin "
+                               "nadie que pueda gestionar cuentas. Crea otro ADMIN "
+                               "primero.")
+
+            valores.append(usuario_id)
+            cur.execute(f"""UPDATE usuarios SET {', '.join(campos)}, actualizado_en = now()
+                             WHERE id = %s
+                         RETURNING id, usuario, nombre, correo, rol, activo""",
+                        valores)
+            fila = cur.fetchone()
+
+            # Desactivar o cambiar de rol tiene que surtir efecto YA. Con la
+            # sesion viva, la persona seguiria entrando o viendo la bandeja de
+            # su rol anterior hasta que caducara.
+            cerradas = 0
+            if cambio.activo is False or cambio.rol is not None:
+                cerradas = auth.cerrar_sesiones_de(cur, usuario_id)
+                auth.registrar_acceso(
+                    cur, fila['usuario'], 'SALIDA',
+                    f"sesiones cerradas por cambio hecho por {admin['usuario']}",
+                    ip, agente)
+        cn.commit()
+
+    return {**fila, "sesiones_cerradas": cerradas}
+
+
+@app.post("/usuarios/{usuario_id}/clave")
+def restablecer_clave(usuario_id: int, peticion: Request, admin=Depends(exigir_admin)):
+    """Genera una clave temporal nueva y corta todas las sesiones de esa cuenta.
+
+    Cortar las sesiones no es un extra: si la clave se restablece porque se
+    filtro, dejar sesiones vivas haria el restablecimiento inutil.
+    """
+    clave = auth.clave_temporal()
+    ip, agente = _contexto(peticion)
+
+    with _conexion() as cn:
+        with cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, usuario FROM usuarios WHERE id = %s", (usuario_id,))
+            fila = cur.fetchone()
+            if not fila:
+                raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+            auth.cambiar_clave(cur, usuario_id, clave)
+            cur.execute("UPDATE usuarios SET debe_cambiar_clave = TRUE WHERE id = %s",
+                        (usuario_id,))
+            cerradas = auth.cerrar_sesiones_de(cur, usuario_id)
+            auth.registrar_acceso(cur, fila['usuario'], 'CLAVE_CAMBIADA',
+                                  f"restablecida por {admin['usuario']}", ip, agente)
+        cn.commit()
+
+    return {"usuario": fila['usuario'], "clave_temporal": clave,
+            "sesiones_cerradas": cerradas,
+            "aviso": "Entregasela por un medio seguro. No se puede volver a consultar."}
+
+
+@app.get("/accesos")
+def bitacora_accesos(limite: int = Query(50, ge=1, le=500),
+                     usuario: Optional[str] = None,
+                     admin=Depends(exigir_admin)):
+    """Quien entro, quien lo intento y fallo.
+
+    Responde una pregunta distinta a `anomalias_historial`: aquel dice quien
+    cambio un dato, este dice quien tuvo acceso al sistema. Ante una fuga de
+    PII, la que hay que poder responder es la segunda.
+    """
+    if usuario:
+        return consultar(
+            """SELECT usuario, evento, detalle, ip, ocurrido_en FROM accesos
+                WHERE usuario = %s ORDER BY ocurrido_en DESC LIMIT %s""",
+            (auth.normalizar_usuario(usuario), limite))
+    return consultar(
+        """SELECT usuario, evento, detalle, ip, ocurrido_en FROM accesos
+            ORDER BY ocurrido_en DESC LIMIT %s""", (limite,))

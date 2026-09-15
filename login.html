@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ingreso — Auditoría de mallas de turnos</title>
+<style>
+  :root{
+    --tinta:#1a2332; --suave:#5b6b7f; --linea:#d8dee6;
+    --fondo:#eef1f5; --papel:#fff; --acento:#1d4ed8; --error:#b42318;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; display:flex; align-items:center;
+    justify-content:center; background:var(--fondo); color:var(--tinta);
+    font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    padding:24px;
+  }
+  .caja{
+    background:var(--papel); width:100%; max-width:400px; border-radius:10px;
+    border:1px solid var(--linea); padding:32px;
+    box-shadow:0 1px 3px rgba(26,35,50,.08), 0 8px 24px rgba(26,35,50,.06);
+  }
+  h1{font-size:19px; margin:0 0 4px}
+  .sub{color:var(--suave); font-size:13px; margin:0 0 24px}
+  label{display:block; font-size:13px; font-weight:600; margin:16px 0 6px}
+  input{
+    width:100%; padding:10px 12px; font-size:15px; font-family:inherit;
+    border:1px solid var(--linea); border-radius:6px; background:#fcfdfe;
+  }
+  input:focus{outline:2px solid var(--acento); outline-offset:-1px; border-color:transparent}
+  button{
+    width:100%; margin-top:22px; padding:11px; font-size:15px; font-weight:600;
+    font-family:inherit; color:#fff; background:var(--acento); border:0;
+    border-radius:6px; cursor:pointer;
+  }
+  button:hover{background:#1a43ba}
+  button:disabled{background:var(--suave); cursor:default}
+  .aviso{
+    margin-top:18px; padding:11px 13px; border-radius:6px; font-size:13px;
+    display:none;
+  }
+  .aviso.error{display:block; background:#fef3f2; color:var(--error); border:1px solid #fecdc9}
+  .aviso.info{display:block; background:#eff6ff; color:#1e40af; border:1px solid #bfdbfe}
+  .pie{
+    margin-top:24px; padding-top:16px; border-top:1px solid var(--linea);
+    font-size:12px; color:var(--suave);
+  }
+  .oculto{display:none}
+  .reglas{font-size:12px; color:var(--suave); margin-top:6px}
+</style>
+</head>
+<body>
+<main class="caja">
+
+  <!-- Paso 1: credenciales -->
+  <form id="formIngreso" autocomplete="on">
+    <h1>Auditoría de mallas de turnos</h1>
+    <p class="sub">Seguridad Shatter de Colombia LTDA BIC</p>
+
+    <label for="usuario">Usuario</label>
+    <input id="usuario" name="username" autocomplete="username" autocapitalize="none"
+           autocorrect="off" spellcheck="false" required autofocus>
+
+    <label for="clave">Clave</label>
+    <input id="clave" name="password" type="password" autocomplete="current-password" required>
+
+    <button type="submit" id="btnIngresar">Ingresar</button>
+    <div class="aviso" id="avisoIngreso"></div>
+  </form>
+
+  <!-- Paso 2: cambio obligatorio de la clave temporal -->
+  <form id="formClave" class="oculto" autocomplete="on">
+    <h1>Cambia tu clave</h1>
+    <p class="sub">
+      Entraste con una clave temporal que te entregó un administrador. Como esa
+      clave la conoce otra persona, hay que cambiarla antes de continuar: de lo
+      contrario, lo que hagas en el sistema no quedaría atribuido solo a ti.
+    </p>
+
+    <label for="claveActual">Clave temporal</label>
+    <input id="claveActual" type="password" autocomplete="current-password" required>
+
+    <label for="claveNueva">Clave nueva</label>
+    <input id="claveNueva" type="password" autocomplete="new-password" required>
+    <div class="reglas">Mínimo 10 caracteres. Una frase que recuerdes sirve mejor
+      que una palabra con símbolos.</div>
+
+    <label for="claveRepetir">Repetir la clave nueva</label>
+    <input id="claveRepetir" type="password" autocomplete="new-password" required>
+
+    <button type="submit" id="btnCambiar">Guardar y continuar</button>
+    <div class="aviso" id="avisoClave"></div>
+  </form>
+
+  <p class="pie">
+    Este sistema contiene datos personales de trabajadores. El acceso queda
+    registrado.
+  </p>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function mostrar(cajaId, texto, tipo){
+  const el = $(cajaId);
+  el.textContent = texto;
+  el.className = 'aviso ' + (tipo || 'error');
+}
+
+async function pedir(ruta, cuerpo){
+  const r = await fetch(ruta, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(cuerpo),
+  });
+  let datos = null;
+  try { datos = await r.json(); } catch(e){ /* respuesta sin cuerpo */ }
+  if (!r.ok){
+    const d = datos && datos.detail;
+    throw new Error(typeof d === 'string' ? d : 'No se pudo completar la operación');
+  }
+  return datos;
+}
+
+$('formIngreso').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('btnIngresar').disabled = true;
+  mostrar('avisoIngreso', '', '');
+  $('avisoIngreso').className = 'aviso';
+  try{
+    const r = await pedir('/login', {
+      usuario: $('usuario').value,
+      clave: $('clave').value,
+    });
+    if (r.debe_cambiar_clave){
+      // Ya hay sesión: el cambio de clave se hace autenticado. Se traslada la
+      // clave temporal para no pedírsela otra vez.
+      $('formIngreso').classList.add('oculto');
+      $('formClave').classList.remove('oculto');
+      $('claveActual').value = $('clave').value;
+      $('claveNueva').focus();
+      return;
+    }
+    location.href = '/';
+  } catch(err){
+    mostrar('avisoIngreso', err.message, 'error');
+    $('clave').value = '';
+    $('clave').focus();
+  } finally {
+    $('btnIngresar').disabled = false;
+  }
+});
+
+$('formClave').addEventListener('submit', async e => {
+  e.preventDefault();
+  if ($('claveNueva').value !== $('claveRepetir').value){
+    mostrar('avisoClave', 'Las dos claves nuevas no coinciden.', 'error');
+    return;
+  }
+  $('btnCambiar').disabled = true;
+  try{
+    const r = await pedir('/cambiar-clave', {
+      clave_actual: $('claveActual').value,
+      clave_nueva: $('claveNueva').value,
+    });
+    if (r.otras_sesiones_cerradas){
+      mostrar('avisoClave',
+        'Listo. Se cerraron ' + r.otras_sesiones_cerradas + ' sesión(es) abiertas en otros equipos.',
+        'info');
+    }
+    location.href = '/';
+  } catch(err){
+    mostrar('avisoClave', err.message, 'error');
+  } finally {
+    $('btnCambiar').disabled = false;
+  }
+});
+</script>
+</body>
+</html>

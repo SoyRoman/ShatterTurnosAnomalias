@@ -1,40 +1,29 @@
 """
-Pruebas de la identidad de la persona y del rechazo de parametros desconocidos.
+Pruebas del login propio, la proteccion de URL y el rastro de auditoria.
 
-    python test_api_identidad.py                   # solo lectura
+    python test_api_identidad.py                   # no toca datos de negocio
     python test_api_identidad.py --con-escritura   # + el camino de escritura
 
-A DIFERENCIA de test_reglas.py, esto SI necesita la base de datos: la API abre
-su pool de conexiones al arrancar. Necesita el .env configurado.
+Necesita la base de datos (a diferencia de test_reglas.py): la API abre su pool
+al arrancar, y aqui ademas se crean y borran usuarios de prueba.
 
-Por defecto NO escribe nada (ver abajo). Con `--con-escritura` se agrega una
-prueba que modifica UNA anomalia real y la restaura: comprueba que el correo
-verificado es el que termina en `anomalias.actualizado_por` y en
-`anomalias_historial.usuario`. Va detras de una bandera porque correrla por
-accidente contra produccion dejaria una fila de auditoria falsa.
+Que protege, y por que hace falta
+---------------------------------
+Tres propiedades que pueden romperse sin que nada falle a la vista:
 
-Por que existe
---------------
-Lo que se prueba aqui es el limite entre "rastro de auditoria confiable" y
-"rastro que solo lo parece". El fallo que hay que impedir es de una linea: un
-`or` de mas en `resolver_identidad` y `X-Usuario` volveria a servir de
-suplantacion en modo PROXY. Eso no rompe nada visible —el dashboard sigue
-funcionando igual— asi que sin una prueba nadie se enteraria hasta que alguien
-tuviera que explicarle al Ministerio del Trabajo por que el historial dice que
-una anomalia la justifico una persona que nunca la vio.
+1. **Ninguna ruta entrega datos sin sesion.** Agregar un endpoint y olvidar la
+   proteccion lo deja abierto en silencio. Por eso el muro es un middleware
+   global y esta prueba recorre TODAS las rutas declaradas, no una lista fija:
+   un endpoint nuevo queda cubierto automaticamente.
+2. **La cabecera X-Usuario no puede suplantar a la sesion.** Un `or` de mas en
+   `resolver_identidad` y cualquiera podria firmar una justificacion con el
+   nombre de otro. El dashboard seguiria funcionando igual.
+3. **Desactivar una cuenta corta el acceso YA.** Es lo que justifica guardar las
+   sesiones en tabla en vez de usar un JWT; si alguien lo cambia por un token
+   autocontenido "para simplificar", esta prueba lo detecta.
 
-NO ESCRIBE EN LA BASE, y no por suerte
---------------------------------------
-Todos los PATCH van contra `anomalias/999999999`, que no existe.
-`resolver_identidad` es una dependencia de FastAPI, asi que corre ANTES del
-handler:
-
-    403 / 422  -> la identidad fue rechazada; no se llego a consultar la BD
-    404        -> la identidad fue ACEPTADA y el handler no encontro la anomalia
-
-O sea que aqui **un 404 es el resultado de exito**. Cero UPDATE, cero filas
-nuevas en anomalias_historial. Si algun dia se cambia el id por uno real, esta
-prueba empezaria a modificar datos de produccion: no lo hagas.
+Los usuarios de prueba se crean con prefijo `_prueba_` y se borran al final,
+incluso si algo falla.
 """
 import json
 import os
@@ -44,30 +33,34 @@ import time
 import urllib.error
 import urllib.request
 
-RAIZ = os.path.dirname(os.path.abspath(__file__))
-ID_INEXISTENTE = 999999999
-CABECERA_CF = "Cf-Access-Authenticated-User-Email"
-CUERPO = {"estado": "EN_REVISION", "nota": "prueba de identidad; no debe escribir"}
+import psycopg2
+import psycopg2.extras
+from dotenv import load_dotenv
 
-# Puertos altos para no chocar con la API que alguien tenga levantada en 8000.
-PUERTO_DECLARATIVA = 8021
-PUERTO_PROXY = 8022
+RAIZ = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, RAIZ)
+import autenticacion as auth   # noqa: E402
+
+PUERTO = 8041
+PREFIJO = '_prueba_'
+ADMIN = PREFIJO + 'admin'
+LLANO = PREFIJO + 'llano'
+CLAVE_ADMIN = 'clave de prueba administrador'
+CLAVE_LLANO = 'clave de prueba sin privilegios'
 
 fallos = []
 
 
-def peticion(url, metodo="GET", cabeceras=None, cuerpo=None):
-    datos = json.dumps(cuerpo).encode() if cuerpo is not None else None
-    pet = urllib.request.Request(url, data=datos, method=metodo)
-    if datos:
-        pet.add_header("Content-Type", "application/json")
-    for k, v in (cabeceras or {}).items():
-        pet.add_header(k, v)
-    try:
-        with urllib.request.urlopen(pet, timeout=10) as r:
-            return r.status, json.loads(r.read() or b"null")
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"null")
+# ---------------------------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------------------------
+
+def conectar():
+    load_dotenv(os.path.join(RAIZ, '.env'))
+    return psycopg2.connect(
+        host=os.environ['DB_HOST'], port=os.environ.get('DB_PORT', '5432'),
+        dbname=os.environ['DB_NAME'], user=os.environ['DB_USER'],
+        password=os.environ['DB_PASSWORD'])
 
 
 def comprobar(etiqueta, obtenido, esperado):
@@ -77,219 +70,375 @@ def comprobar(etiqueta, obtenido, esperado):
         fallos.append(etiqueta)
 
 
-def arrancar(puerto, entorno_extra):
-    """Levanta la API en un proceso aparte con el entorno pedido.
+class _SinSeguirRedirecciones(urllib.request.HTTPRedirectHandler):
+    """urllib sigue los 3xx por su cuenta y aqui eso esconde lo que se prueba.
 
-    Se usa un proceso y no TestClient a proposito: MODO_IDENTIDAD se lee al
-    IMPORTAR api.py, asi que probar los dos modos en el mismo interprete
-    exigiria recargar el modulo y es mas fragil que arrancar dos veces.
+    El muro responde 303 hacia /login a un navegador sin sesion; si el cliente
+    lo sigue, la prueba ve un 200 de la pagina de login y no distingue "me
+    redirigio" de "me dejo entrar". Hay que ver el 303 tal cual.
     """
+    def redirect_request(self, *a, **k):
+        return None
+
+
+_ABRIDOR = urllib.request.build_opener(_SinSeguirRedirecciones)
+
+
+def _json_o_nada(bruto):
+    """El cuerpo no siempre es JSON: /login y / devuelven HTML."""
+    try:
+        return json.loads(bruto or b'null')
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def peticion(ruta, metodo='GET', cuerpo=None, cookie=None, cabeceras=None):
+    datos = json.dumps(cuerpo).encode() if cuerpo is not None else None
+    pet = urllib.request.Request(f"http://127.0.0.1:{PUERTO}{ruta}", data=datos, method=metodo)
+    if datos:
+        pet.add_header('Content-Type', 'application/json')
+    if cookie:
+        pet.add_header('Cookie', f"{auth.NOMBRE_COOKIE}={cookie}")
+    for k, v in (cabeceras or {}).items():
+        pet.add_header(k, v)
+    try:
+        with _ABRIDOR.open(pet, timeout=10) as r:
+            galleta = None
+            for clave, valor in r.getheaders():
+                if clave.lower() == 'set-cookie' and auth.NOMBRE_COOKIE in valor:
+                    galleta = valor.split(';')[0].split('=', 1)[1]
+            return r.status, _json_o_nada(r.read()), galleta
+    except urllib.error.HTTPError as e:
+        # Un 3xx tambien llega aqui, porque el manejador de arriba se niega a
+        # seguirlo. Es justo lo que se quiere observar.
+        return e.code, _json_o_nada(e.read()), None
+
+
+def arrancar():
     proceso = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "api:app", "--host", "127.0.0.1",
-         "--port", str(puerto), "--log-level", "warning"],
-        cwd=RAIZ, env={**os.environ, **entorno_extra},
+        [sys.executable, '-m', 'uvicorn', 'api:app', '--host', '127.0.0.1',
+         '--port', str(PUERTO), '--log-level', 'warning'],
+        cwd=RAIZ, env={**os.environ, 'MODO_IDENTIDAD': 'SESION', 'COOKIE_SEGURA': '0'},
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    base = f"http://127.0.0.1:{puerto}"
     for _ in range(60):
         if proceso.poll() is not None:
-            raise SystemExit(
-                f"la API murio al arrancar en el puerto {puerto}. "
-                "Revisa el .env y que PostgreSQL este arriba.")
+            raise SystemExit("la API murio al arrancar; revisa el .env y PostgreSQL")
         try:
-            peticion(base + "/salud")
-            return proceso, base
+            peticion('/salud')
+            return proceso
         except Exception:
             time.sleep(0.5)
     proceso.kill()
-    raise SystemExit(f"la API no respondio en el puerto {puerto} tras 30 s")
+    raise SystemExit("la API no respondio en 30 s")
 
 
-def probar_declarativa():
-    print("=== MODO DECLARATIVA (red interna; el cliente dice quien es) ===")
-    proceso, base = arrancar(PUERTO_DECLARATIVA, {"MODO_IDENTIDAD": "DECLARATIVA"})
-    try:
-        _, ident = peticion(base + "/identidad")
-        comprobar("/identidad reporta el modo", ident["modo"], "DECLARATIVA")
-        comprobar("/identidad no inventa un usuario", ident["usuario"], None)
-
-        cod, _ = peticion(f"{base}/anomalias/{ID_INEXISTENTE}", "PATCH", cuerpo=CUERPO)
-        comprobar("PATCH sin X-Usuario se rechaza", cod, 422)
-
-        # Una cabecera en blanco no puede colarse como atribucion: dejaria una
-        # fila de historial que no dice quien hizo el cambio.
-        cod, _ = peticion(f"{base}/anomalias/{ID_INEXISTENTE}", "PATCH",
-                          {"X-Usuario": "   "}, CUERPO)
-        comprobar("PATCH con X-Usuario en blanco se rechaza", cod, 422)
-
-        cod, _ = peticion(f"{base}/anomalias/{ID_INEXISTENTE}", "PATCH",
-                          {"X-Usuario": "camilo"}, CUERPO)
-        comprobar("PATCH con X-Usuario pasa la identidad (404 = llego al handler)",
-                  cod, 404)
-    finally:
-        proceso.kill()
+def sembrar(cur):
+    limpiar(cur)
+    auth.crear_usuario(cur, ADMIN, 'Admin De Prueba', 'ADMIN', CLAVE_ADMIN,
+                       creado_por='test', debe_cambiar=False)
+    auth.crear_usuario(cur, LLANO, 'Usuario De Prueba', 'PROGRAMADOR', CLAVE_LLANO,
+                       creado_por='test', debe_cambiar=False)
 
 
-def probar_proxy():
-    print("\n=== MODO PROXY (Cloudflare Access delante) ===")
-    proceso, base = arrancar(PUERTO_PROXY, {"MODO_IDENTIDAD": "PROXY",
-                                            "CABECERA_IDENTIDAD": CABECERA_CF})
-    try:
-        _, ident = peticion(base + "/identidad")
-        comprobar("/identidad reporta el modo", ident["modo"], "PROXY")
-        comprobar("/identidad sin cabecera no inventa usuario", ident["usuario"], None)
-
-        _, ident = peticion(base + "/identidad", cabeceras={CABECERA_CF: "ana@empresa.com"})
-        comprobar("/identidad refleja la cabecera verificada",
-                  ident["usuario"], "ana@empresa.com")
-
-        cod, _ = peticion(f"{base}/anomalias/{ID_INEXISTENTE}", "PATCH", cuerpo=CUERPO)
-        comprobar("PATCH sin identidad verificada -> 403", cod, 403)
-
-        # ESTE ES EL CASO QUE JUSTIFICA TODO EL ARCHIVO.
-        # Si algun dia esto devuelve 404, significa que X-Usuario volvio a
-        # servir de identidad en modo PROXY: cualquiera podria firmar una
-        # justificacion con el nombre de otro.
-        cod, _ = peticion(f"{base}/anomalias/{ID_INEXISTENTE}", "PATCH",
-                          {"X-Usuario": "el_jefe"}, CUERPO)
-        comprobar("PATCH con SOLO X-Usuario -> 403 (no hay suplantacion)", cod, 403)
-
-        cod, _ = peticion(f"{base}/anomalias/{ID_INEXISTENTE}", "PATCH",
-                          {CABECERA_CF: "ana@empresa.com"}, CUERPO)
-        comprobar("PATCH con cabecera verificada pasa (404 = llego al handler)",
-                  cod, 404)
-
-        # Parametros desconocidos: el defecto que devolvia la primera pagina sin
-        # filtrar con apariencia de haber filtrado, o sea datos de otro guarda.
-        cod, _ = peticion(base + "/anomalias?cedula=123456")
-        comprobar("/anomalias?cedula= (parametro inventado) -> 422", cod, 422)
-
-        cod, _ = peticion(base + "/anomalias?busqueda=x&pagina=1&por_pagina=5")
-        comprobar("/anomalias con parametros validos sigue funcionando", cod, 200)
-    finally:
-        proceso.kill()
+def limpiar(cur):
+    cur.execute("DELETE FROM usuarios WHERE usuario LIKE %s", (PREFIJO + '%',))
+    cur.execute("DELETE FROM accesos WHERE usuario LIKE %s", (PREFIJO + '%',))
 
 
-def probar_modo_invalido():
-    print("\n=== Un MODO_IDENTIDAD invalido debe abortar el arranque ===")
-    # Fallar al arrancar y no caer a un default: un typo en la variable no puede
-    # dejar la API sirviendo en modo declarativo sin que nadie lo note.
-    r = subprocess.run([sys.executable, "-c", "import api"], cwd=RAIZ,
-                       env={**os.environ, "MODO_IDENTIDAD": "CLOUDFLARE"},
-                       capture_output=True, text=True)
-    comprobar("importar api con modo invalido falla", r.returncode != 0, True)
-    salida = (r.stderr or r.stdout).strip().splitlines()
-    comprobar("el mensaje nombra la variable",
-              "MODO_IDENTIDAD" in (salida[-1] if salida else ""), True)
+# ---------------------------------------------------------------------------
+# Pruebas
+# ---------------------------------------------------------------------------
+
+def probar_muro(cookie_admin):
+    """Recorre TODAS las rutas declaradas por la propia API."""
+    print("=== El muro: ninguna ruta entrega datos sin sesion ===")
+
+    esquema = peticion('/openapi.json', cookie=cookie_admin)[1]
+    rutas = [r for r in esquema['paths']
+             if '{' not in r and r not in auth_rutas_libres()]
+    print(f"    descubiertas {len(rutas)} rutas GET/POST sin parametros de ruta")
+
+    abiertas = []
+    for ruta in rutas:
+        cod, _, _ = peticion(ruta)
+        if cod not in (401, 403, 404, 405, 422):
+            abiertas.append(f"{ruta} -> {cod}")
+    comprobar("ninguna ruta responde sin sesion", abiertas, [])
+
+    # El dashboard y la documentacion tampoco, que es lo que un middleware
+    # cubre y un `Depends` por ruta no.
+    for ruta in ('/', '/docs', '/openapi.json'):
+        cod, _, _ = peticion(ruta)
+        comprobar(f"{ruta} sin sesion", cod, 401)
+
+    # A un navegador se le redirige al login en vez de un 401 crudo.
+    cod, _, _ = peticion('/', cabeceras={'Accept': 'text/html'})
+    comprobar("un navegador es redirigido a /login", cod, 303)
+
+    for ruta in ('/salud', '/login'):
+        cod, _, _ = peticion(ruta)
+        comprobar(f"{ruta} es publica", cod, 200)
 
 
-def probar_escritura():
-    """Comprueba que la identidad VERIFICADA es la que queda ESCRITA.
+def auth_rutas_libres():
+    import api
+    return api.RUTAS_LIBRES
 
-    Las pruebas de arriba usan un id inexistente, asi que nunca ejercitan el
-    camino de escritura. Eso deja un hueco real: `resolver_identidad` alimenta
-    el UPDATE de `anomalias` y el INSERT de `anomalias_historial`, y si se
-    perdiera uno de los dos —o se cruzaran— ninguna prueba de codigo de estado
-    lo notaria. El historial diria que un cambio lo hizo alguien que no fue.
 
-    ESTA PRUEBA SI ESCRIBE, sobre UNA anomalia real, y restaura en el `finally`
-    verificando que la base volvio a como estaba. Va detras de una bandera
-    porque correrla por accidente contra produccion dejaria un cambio de estado
-    y una fila de auditoria falsa — exactamente el tipo de dato que este
-    sistema existe para que sea confiable.
+def probar_clasificacion():
+    """Ninguna ruta de la API puede quedar fuera de la tabla de permisos.
+
+    Es la prueba que hace que la tabla no se quede atras: si alguien agrega un
+    endpoint y no lo clasifica, esto falla aqui en vez de dejarlo inaccesible
+    (o peor, accesible) en produccion sin que nadie lo note.
     """
-    print("\n=== ESCRITURA: la identidad verificada es la que se guarda ===")
-    print("    (modifica UNA anomalia real y la restaura)")
+    print("=== Toda ruta esta clasificada ===")
+    import api
+    rutas = [r for r in api.app.openapi()['paths']]
+    sin_clasificar = []
+    for ruta in rutas:
+        # Las rutas con parametro se resuelven por prefijo; se prueba con un
+        # valor concreto, que es lo que vera el middleware.
+        concreta = ruta.replace('{anomalia_id}', '1').replace('{usuario_id}', '1')
+        if concreta in api.RUTAS_LIBRES:
+            continue
+        if api.roles_de_ruta(concreta) is None:
+            sin_clasificar.append(ruta)
+    comprobar(f"las {len(rutas)} rutas tienen roles asignados", sin_clasificar, [])
 
-    import psycopg2
-    import psycopg2.extras
-    from dotenv import load_dotenv
+    # Y las paginas que no son endpoints declarados.
+    for ruta in ('/', '/docs', '/openapi.json'):
+        comprobar(f"{ruta} clasificada", api.roles_de_ruta(ruta) is not None, True)
 
-    load_dotenv(os.path.join(RAIZ, ".env"))
-    cn = psycopg2.connect(
-        host=os.environ["DB_HOST"], port=os.environ.get("DB_PORT", "5432"),
-        dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"])
-    cn.autocommit = True
-    cur = cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    correo = "prueba.identidad@invalido.local"
 
-    def contar():
-        cur.execute("SELECT (SELECT count(*) FROM anomalias) a,"
-                    "       (SELECT count(*) FROM anomalias_historial) h")
-        return dict(cur.fetchone())
+def probar_autorizacion(cur):
+    """Cada rol alcanza su bandeja y ninguna otra."""
+    print()
+    print("=== Autorizacion por URL segun el rol ===")
+    import api
 
-    inicial = contar()
+    # Un usuario por rol, para probar la matriz completa.
+    claves = {}
+    for rol in ('GERENCIA', 'NOMINA'):
+        nombre = PREFIJO + rol.lower()
+        clave = f"clave de prueba {rol.lower()}"
+        cur.execute("DELETE FROM usuarios WHERE usuario = %s", (nombre,))
+        auth.crear_usuario(cur, nombre, f"{rol} De Prueba", rol, clave,
+                           creado_por='test', debe_cambiar=False)
+        claves[rol] = (nombre, clave)
+    claves['PROGRAMADOR'] = (LLANO, CLAVE_LLANO)
+    claves['ADMIN'] = (ADMIN, CLAVE_ADMIN)
+
+    esperado = {
+        '/kpi':               {'ADMIN', 'GERENCIA'},
+        '/estructural':       {'ADMIN', 'GERENCIA'},
+        '/clientes':          {'ADMIN', 'GERENCIA'},
+        '/informe/mensual?periodo=2026-07': {'ADMIN', 'GERENCIA'},
+        '/anomalias':         {'ADMIN', 'GERENCIA', 'PROGRAMADOR'},
+        '/nomina':            {'ADMIN', 'GERENCIA', 'NOMINA'},
+        '/usuarios':          {'ADMIN'},
+        '/accesos':           {'ADMIN'},
+        '/docs':              {'ADMIN'},
+        '/periodos':          {'ADMIN', 'GERENCIA', 'PROGRAMADOR', 'NOMINA'},
+        '/reglas':            {'ADMIN', 'GERENCIA', 'PROGRAMADOR', 'NOMINA'},
+    }
+
+    cookies = {}
+    for rol, (nombre, clave) in claves.items():
+        _, _, cookies[rol] = peticion('/login', 'POST', {'usuario': nombre, 'clave': clave})
+
+    errores = []
+    for ruta, permitidos in esperado.items():
+        for rol, cookie in cookies.items():
+            cod, _, _ = peticion(ruta, cookie=cookie)
+            deberia_entrar = rol in permitidos
+            entro = cod == 200
+            if entro != deberia_entrar:
+                errores.append(f"{rol} en {ruta}: HTTP {cod} "
+                               f"(esperaba {'200' if deberia_entrar else '403'})")
+    comprobar(f"matriz de {len(esperado)} rutas x {len(cookies)} roles", errores, [])
+
+    # El endpoint peligroso: recarga la base entera y recibe la ruta del archivo
+    # en la peticion. Un PROGRAMADOR no puede dispararlo.
+    for rol in ('PROGRAMADOR', 'NOMINA', 'GERENCIA'):
+        cod, _, _ = peticion('/pipeline/ejecutar', 'POST', {'archivo': 'x.xlsx'},
+                             cookie=cookies[rol])
+        comprobar(f"{rol} NO puede ejecutar el pipeline", cod, 403)
+
+    # Una ruta inventada no revela nada.
+    cod, _, _ = peticion('/inventada', cookie=cookies['ADMIN'])
+    comprobar("ruta sin clasificar se niega", cod, 404)
+
+    # Los paneles que ve cada rol salen de la misma tabla.
+    _, ident, _ = peticion('/identidad', cookie=cookies['PROGRAMADOR'])
+    comprobar("un PROGRAMADOR solo ve su bandeja", ident['paneles'], ['programador'])
+    _, ident, _ = peticion('/identidad', cookie=cookies['NOMINA'])
+    comprobar("un NOMINA solo ve la suya", ident['paneles'], ['nomina'])
+    _, ident, _ = peticion('/identidad', cookie=cookies['ADMIN'])
+    comprobar("un ADMIN las ve todas", len(ident['paneles']), 4)
+
+    return cookies
+
+
+def probar_login():
+    print("\n=== Login ===")
+    cod, _, _ = peticion('/login', 'POST', {'usuario': ADMIN, 'clave': 'incorrecta'})
+    comprobar("clave incorrecta", cod, 401)
+
+    # El mensaje debe ser el MISMO: distinguirlos confirmaria que cuentas
+    # existen, que es el primer paso para dirigir la fuerza bruta.
+    _, c1, _ = peticion('/login', 'POST', {'usuario': ADMIN, 'clave': 'incorrecta'})
+    _, c2, _ = peticion('/login', 'POST', {'usuario': PREFIJO + 'noexiste', 'clave': 'x'})
+    comprobar("el error no revela si la cuenta existe", c1['detail'], c2['detail'])
+
+    cod, cuerpo, cookie = peticion('/login', 'POST', {'usuario': ADMIN, 'clave': CLAVE_ADMIN})
+    comprobar("clave correcta", cod, 200)
+    comprobar("entrega cookie de sesion", bool(cookie), True)
+    comprobar("reporta el rol", cuerpo['rol'], 'ADMIN')
+    return cookie
+
+
+def probar_roles(cookie_admin):
+    print("\n=== Roles: solo ADMIN gestiona cuentas ===")
+    _, _, cookie_llano = peticion('/login', 'POST', {'usuario': LLANO, 'clave': CLAVE_LLANO})
+
+    for ruta, metodo, cuerpo in (('/usuarios', 'GET', None),
+                                 ('/accesos', 'GET', None),
+                                 ('/usuarios', 'POST', {'usuario': PREFIJO + 'colado',
+                                                        'nombre': 'Colado', 'rol': 'ADMIN'})):
+        cod, _, _ = peticion(ruta, metodo, cuerpo, cookie=cookie_llano)
+        comprobar(f"{metodo} {ruta} sin ser ADMIN", cod, 403)
+
+    cod, _, _ = peticion('/anomalias', cookie=cookie_llano)
+    comprobar("un PROGRAMADOR si alcanza su bandeja", cod, 200)
+    cod, _, _ = peticion('/kpi', cookie=cookie_llano)
+    comprobar("pero NO la de gerencia", cod, 403)
+
+    cod, _, _ = peticion('/usuarios', cookie=cookie_admin)
+    comprobar("/usuarios siendo ADMIN", cod, 200)
+    return cookie_llano
+
+
+def probar_corte_de_acceso(cur, cookie_admin, cookie_llano):
+    """Lo que justifica sesiones en tabla en vez de un JWT."""
+    print("\n=== Desactivar una cuenta corta el acceso al instante ===")
+    cod, _, _ = peticion('/anomalias', cookie=cookie_llano)
+    comprobar("antes de desactivar, la sesion sirve", cod, 200)
+
+    cur.execute("SELECT id FROM usuarios WHERE usuario = %s", (LLANO,))
+    id_llano = cur.fetchone()['id']
+    cod, cuerpo, _ = peticion(f'/usuarios/{id_llano}', 'PATCH', {'activo': False},
+                              cookie=cookie_admin)
+    comprobar("el ADMIN desactiva la cuenta", cod, 200)
+    comprobar("y le cierra las sesiones", cuerpo['sesiones_cerradas'] >= 1, True)
+
+    cod, _, _ = peticion('/anomalias', cookie=cookie_llano)
+    comprobar("la MISMA cookie ya no sirve", cod, 401)
+    cod, _, _ = peticion('/login', 'POST', {'usuario': LLANO, 'clave': CLAVE_LLANO})
+    comprobar("y tampoco puede volver a entrar", cod, 401)
+
+
+def probar_ultimo_admin(cur, cookie_admin):
+    print("\n=== No se puede dejar el sistema sin ADMIN ===")
+    cur.execute("SELECT id FROM usuarios WHERE usuario = %s", (ADMIN,))
+    mi_id = cur.fetchone()['id']
+    cod, _, _ = peticion(f'/usuarios/{mi_id}', 'PATCH', {'activo': False}, cookie=cookie_admin)
+    comprobar("un ADMIN no puede desactivarse a si mismo", cod, 409)
+    cod, _, _ = peticion(f'/usuarios/{mi_id}', 'PATCH', {'rol': 'NOMINA'}, cookie=cookie_admin)
+    comprobar("ni degradarse a si mismo", cod, 409)
+
+
+def probar_suplantacion(cookie_admin):
+    print("\n=== X-Usuario no puede suplantar a la sesion ===")
+    # Id inexistente: `resolver_identidad` corre antes del handler, asi que un
+    # 404 significa "identidad aceptada" sin escribir nada.
+    cod, _, _ = peticion('/anomalias/999999999', 'PATCH',
+                         {'estado': 'EN_REVISION', 'nota': 'x'},
+                         cookie=cookie_admin, cabeceras={'X-Usuario': 'el_jefe'})
+    comprobar("con sesion, la cabecera no estorba (404 = llego al handler)", cod, 404)
+
+    cod, _, _ = peticion('/anomalias/999999999', 'PATCH',
+                         {'estado': 'EN_REVISION', 'nota': 'x'},
+                         cabeceras={'X-Usuario': 'el_jefe'})
+    comprobar("SIN sesion, la cabecera sola no sirve", cod, 401)
+
+    cod, _, _ = peticion('/anomalias?cedula=123456', cookie=cookie_admin)
+    comprobar("/anomalias?cedula= (parametro inventado) -> 422", cod, 422)
+
+
+def probar_escritura(cur, cookie_admin):
+    """Verifica QUE queda escrito. Modifica una anomalia real y la restaura."""
+    print("\n=== La identidad de la sesion es la que se guarda ===")
+    cur.execute("SELECT (SELECT count(*) FROM anomalias) a,"
+                "       (SELECT count(*) FROM anomalias_historial) h")
+    base = dict(cur.fetchone())
     cur.execute("""SELECT id, estado, nota, actualizado_por, actualizado_en
                      FROM anomalias WHERE estado = 'ABIERTA' ORDER BY id LIMIT 1""")
     antes = cur.fetchone()
     if not antes:
         print("  (no hay anomalias ABIERTA; se omite)")
-        cn.close()
         return
     print(f"    anomalia de prueba: id={antes['id']}")
-
-    proceso, base = arrancar(PUERTO_PROXY + 1, {"MODO_IDENTIDAD": "PROXY",
-                                                "CABECERA_IDENTIDAD": CABECERA_CF})
     try:
-        cod, _ = peticion(f"{base}/anomalias/{antes['id']}", "PATCH",
-                          {CABECERA_CF: correo},
-                          {"estado": "EN_REVISION", "nota": "prueba automatica"})
-        comprobar("PATCH con identidad verificada -> 200", cod, 200)
+        cod, _, _ = peticion(f"/anomalias/{antes['id']}", 'PATCH',
+                             {'estado': 'EN_REVISION', 'nota': 'prueba automatica'},
+                             cookie=cookie_admin, cabeceras={'X-Usuario': 'el_jefe'})
+        comprobar("PATCH con sesion -> 200", cod, 200)
 
-        cur.execute("SELECT estado, actualizado_por FROM anomalias WHERE id = %s",
-                    (antes["id"],))
-        fila = cur.fetchone()
-        comprobar("anomalias.actualizado_por = correo verificado",
-                  fila["actualizado_por"], correo)
-
-        cur.execute("""SELECT usuario, estado_anterior FROM anomalias_historial
-                        WHERE anomalia_id = %s""", (antes["id"],))
-        hist = cur.fetchall()
-        comprobar("se escribio 1 fila de historial", len(hist), 1)
-        if hist:
-            comprobar("anomalias_historial.usuario = correo verificado",
-                      hist[0]["usuario"], correo)
-            comprobar("el historial guarda el estado anterior",
-                      hist[0]["estado_anterior"], antes["estado"])
-
-        # Suplantacion sobre una anomalia REAL: debe rebotar y no escribir.
-        cod, _ = peticion(f"{base}/anomalias/{antes['id']}", "PATCH",
-                          {"X-Usuario": "otra.persona@invalido.local"},
-                          {"estado": "JUSTIFICADA", "nota": "suplantacion"})
-        comprobar("PATCH con solo X-Usuario sobre una real -> 403", cod, 403)
-        cur.execute("SELECT count(*) n FROM anomalias_historial WHERE anomalia_id = %s",
-                    (antes["id"],))
-        comprobar("el intento de suplantacion no escribio", cur.fetchone()["n"], 1)
+        cur.execute("SELECT actualizado_por FROM anomalias WHERE id = %s", (antes['id'],))
+        comprobar("anomalias.actualizado_por = la SESION, no la cabecera",
+                  cur.fetchone()['actualizado_por'], ADMIN)
+        cur.execute("SELECT usuario FROM anomalias_historial WHERE anomalia_id = %s",
+                    (antes['id'],))
+        hist = [r['usuario'] for r in cur.fetchall()]
+        comprobar("anomalias_historial.usuario = la SESION", hist, [ADMIN])
     finally:
-        proceso.kill()
-        cur.execute("""UPDATE anomalias
-                          SET estado = %s, nota = %s, actualizado_por = %s,
-                              actualizado_en = %s
-                        WHERE id = %s""",
-                    (antes["estado"], antes["nota"], antes["actualizado_por"],
-                     antes["actualizado_en"], antes["id"]))
-        cur.execute("DELETE FROM anomalias_historial WHERE anomalia_id = %s",
-                    (antes["id"],))
-        comprobar("la base volvio a como estaba", contar(), inicial)
+        cur.execute("""UPDATE anomalias SET estado=%s, nota=%s, actualizado_por=%s,
+                              actualizado_en=%s WHERE id=%s""",
+                    (antes['estado'], antes['nota'], antes['actualizado_por'],
+                     antes['actualizado_en'], antes['id']))
+        cur.execute("DELETE FROM anomalias_historial WHERE anomalia_id = %s", (antes['id'],))
+        cur.execute("SELECT (SELECT count(*) FROM anomalias) a,"
+                    "       (SELECT count(*) FROM anomalias_historial) h")
+        comprobar("la base volvio a como estaba", dict(cur.fetchone()), base)
+
+
+def main():
+    cn = conectar()
+    cn.autocommit = True
+    cur = cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    proceso = None
+    try:
+        sembrar(cur)
+        proceso = arrancar()
+
+        cookie_admin = probar_login()
+        probar_clasificacion()
+        probar_muro(cookie_admin)
+        probar_autorizacion(cur)
+        cookie_llano = probar_roles(cookie_admin)
+        probar_corte_de_acceso(cur, cookie_admin, cookie_llano)
+        probar_ultimo_admin(cur, cookie_admin)
+        probar_suplantacion(cookie_admin)
+        if '--con-escritura' in sys.argv:
+            probar_escritura(cur, cookie_admin)
+        else:
+            print("\n(omitida la prueba de escritura; para incluirla: "
+                  "python test_api_identidad.py --con-escritura)")
+    finally:
+        if proceso:
+            proceso.kill()
+        limpiar(cur)
         cn.close()
 
-
-if __name__ == "__main__":
-    probar_declarativa()
-    probar_proxy()
-    probar_modo_invalido()
-    if "--con-escritura" in sys.argv:
-        probar_escritura()
-    else:
-        print("\n(omitida la prueba de escritura; para incluirla: "
-              "python test_api_identidad.py --con-escritura)")
     print()
     if fallos:
         print(f"FALLARON {len(fallos)}:")
         for f in fallos:
             print(f"  - {f}")
         sys.exit(1)
-    if "--con-escritura" in sys.argv:
-        print("Todas las comprobaciones pasaron. La anomalia de prueba quedo restaurada.")
-    else:
-        print("Todas las comprobaciones pasaron. Cero escrituras en la base.")
+    print("Todas las comprobaciones pasaron. Usuarios de prueba eliminados.")
+
+
+if __name__ == '__main__':
+    main()

@@ -23,19 +23,23 @@ información en PostgreSQL siguiendo el esquema de `schema.sql`.
   mientras el módulo de turnos no tenga API.
 - `pipeline_diario.py` — la corrida diaria completa: descarga + ETL + motor,
   con reintentos, bitácora y códigos de salida distinguibles.
-- `Dockerfile`, `docker-compose.yml` — empaquetado. Tres perfiles: `manual`
-  (pipeline), `local` (PostgreSQL de pruebas) y `produccion` (túnel de
-  Cloudflare).
-- `despliegue/` — unidades de systemd para la ejecución programada,
-  `DESPLIEGUE.md` (paso a paso del despliegue en AWS) y `CLOUDFLARE.md`
-  (configuración del autenticador).
+- `autenticacion.py` — login propio: claves con bcrypt, sesiones en servidor.
+- `migracion_004_usuarios.sql` — tablas `usuarios`, `sesiones` y `accesos`.
+- `gestionar_usuarios.py` — administración de cuentas por consola. Crea la
+  primera, que no se puede crear desde el dashboard.
+- `login.html` — pantalla de ingreso y de cambio de clave temporal.
+- `Dockerfile`, `docker-compose.yml` — empaquetado. Dos perfiles: `manual`
+  (pipeline) y `local` (PostgreSQL de pruebas).
+- `despliegue/` — unidades de systemd y `DESPLIEGUE.md`, el paso a paso del
+  despliegue en AWS.
 - `migracion_002_dashboard.sql`, `migracion_003_estados.sql` — solo para bases
   creadas con versiones anteriores del esquema. En instalación limpia no hacen
   falta: `schema.sql` ya las incorpora.
 - `generar_informe.py` — genera un informe autónomo en un solo HTML.
 - `test_reglas.py` — pruebas de los detectores; no necesitan base de datos.
-- `test_api_identidad.py` — pruebas de los dos modos de identidad y del
-  rechazo de parámetros desconocidos; **sí** necesitan base de datos.
+- `test_api_identidad.py` — pruebas del login, de que ninguna URL responda sin
+  sesión y de que la identidad del historial no se pueda suplantar; **sí**
+  necesitan base de datos.
 - `requirements.txt`, `.env.example`.
 
 ## Primera vez
@@ -65,8 +69,12 @@ cp .env.example .env
 # edita .env: DB_PASSWORD debe ser la clave que elegiste arriba
 
 psql -U turnos_app -d turnos -f schema.sql
+psql -U turnos_app -d turnos -f migracion_004_usuarios.sql
 psql -U turnos_app -d turnos -f seed_reglas.sql
 psql -U turnos_app -d turnos -f vistas_reporte.sql
+
+# La primera cuenta: sin esto no se puede entrar al dashboard
+python gestionar_usuarios.py crear --usuario <tu> --nombre "Tu Nombre" --rol ADMIN
 ```
 
 > `.env` nunca viaja con el repo (está en `.gitignore`): al clonar en una
@@ -144,52 +152,121 @@ python3 motor_reglas.py --desde 2026-08-01 --hasta 2026-08-31
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-El dashboard queda en `http://<servidor>:8000/` y la documentación
-interactiva de la API en `/docs`.
+El dashboard queda en `http://<servidor>:8000/`. La primera visita redirige a
+`/login`; después de entrar, la documentación interactiva está en `/docs`.
 
-Define `API_TOKEN` en el `.env` para exigir la cabecera `X-API-Token` en cada
-petición. Si no la defines, la API arranca **sin autenticación** y lo avisa por
-consola — sólo aceptable en red interna cerrada.
+### Login y control de acceso
 
-### Quién es la persona: `MODO_IDENTIDAD`
+La autenticación es **propia**: usuarios, claves y sesiones viven en esta misma
+base y no dependen de ningún proveedor externo. Tú creas las cuentas y se las
+entregas a quien deba entrar.
 
-`API_TOKEN` autentica al *sistema* que llama, no a la *persona*. Para la
-persona hay dos modos, y la diferencia decide si `anomalias_historial` es un
-rastro de auditoría confiable o solo lo parece:
+**Ninguna URL responde sin sesión** — ni el dashboard, ni `/docs`, ni
+`/openapi.json`. Solo `/salud` (el healthcheck del contenedor, que no devuelve
+datos personales) y `/login`. Eso lo garantiza un *middleware* global y no una
+lista de rutas protegidas una por una: con la lista, agregar un endpoint y
+olvidar la protección lo dejaría abierto sin que nada fallara.
 
-| Modo | Cómo se identifica | Cuándo usarlo |
-|---|---|---|
-| `DECLARATIVA` **(default)** | El dashboard pide un nombre y lo manda en `X-Usuario`. **Nadie verifica que sea quien dice** | Solo red interna cerrada |
-| `PROXY` | Se lee de `CABECERA_IDENTIDAD`, que pone un proxy que **ya autenticó** a la persona. `X-Usuario` se ignora; si falta la cabecera → `403` | Producción |
+#### La primera cuenta
 
-```
-MODO_IDENTIDAD=PROXY
-CABECERA_IDENTIDAD=Cf-Access-Authenticated-User-Email   # Cloudflare Access
-# CABECERA_IDENTIDAD=x-amzn-oidc-identity               # ALB + Cognito
-```
-
-**El default es el modo inseguro a propósito**, para no romper la operación
-actual en red interna. La contrapartida es que olvidarlo **no da ningún error**:
-la API arranca y funciona igual, solo lo avisa por consola. Por eso
-`docker-compose.yml` no publica el puerto a la red — la barrera real contra
-desplegar en modo declarativo es que no haya por dónde llegar.
-
-En modo `PROXY` el dashboard consulta `GET /identidad`, muestra el correo
-verificado y deja de pedir un nombre. Configuración paso a paso en
-[despliegue/CLOUDFLARE.md](despliegue/CLOUDFLARE.md).
+No se puede crear desde el dashboard —para entrar hace falta una cuenta—, así
+que se crea por consola:
 
 ```bash
-python test_api_identidad.py                   # 14 comprobaciones de los dos modos
-python test_api_identidad.py --con-escritura   # + 7 del camino de escritura
+psql -U turnos_app -d turnos -f migracion_004_usuarios.sql
+python gestionar_usuarios.py crear --usuario <tu-usuario> --nombre "Tu Nombre" --rol ADMIN
 ```
 
-> A diferencia de `test_reglas.py`, esta prueba **sí necesita la base de
-> datos** (la API abre su pool al arrancar). Por defecto **no escribe nada**:
-> hace `PATCH` sobre un id inexistente, así que un `404` es su resultado de
-> éxito. Con `--con-escritura` modifica una anomalía real y la restaura,
-> comprobando que el correo verificado es el que queda en
-> `anomalias.actualizado_por` y en `anomalias_historial.usuario` — el hueco que
-> las pruebas de código de estado no cubren.
+Imprime una **clave temporal**. Entrégasela a la persona por un medio seguro: el
+sistema la obliga a cambiarla al entrar, así que deja de servir en cuanto la use
+— y a partir de ahí lo que haga queda atribuido solo a ella.
+
+#### Después, desde el dashboard
+
+Con rol `ADMIN` aparece la pestaña **Cuentas**: crear, cambiar rol, restablecer
+clave, desactivar, y la bitácora de quién entró y quién lo intentó.
+
+Los cuatro roles son las tres bandejas más el administrador:
+
+| Rol | Qué ve |
+|---|---|
+| `PROGRAMADOR` | Hallazgos puntuales, agrupados por puesto |
+| `NOMINA` | Descuadres de horas |
+| `GERENCIA` | Hallazgos estructurales y KPI |
+| `ADMIN` | Todo lo anterior **y** la gestión de cuentas |
+
+También desde consola, útil si alguien se bloquea a sí mismo:
+
+```bash
+python gestionar_usuarios.py listar
+python gestionar_usuarios.py clave --usuario ana       # clave nueva
+python gestionar_usuarios.py desactivar --usuario ana
+python gestionar_usuarios.py sesiones                  # quién está conectado
+python gestionar_usuarios.py accesos                   # bitácora
+```
+
+#### Protección de URLs por rol
+
+No basta con exigir sesión: cada URL está asignada a los roles que pueden
+tocarla, en una **tabla declarativa** (`PERMISOS` en `api.py`) que aplica el
+mismo middleware.
+
+| URL | Quién entra |
+|---|---|
+| `/`, `/identidad`, `/periodos`, `/reglas` | Todos |
+| `/anomalias` | Programador, Gerencia, Admin |
+| `/nomina` | Nómina, Gerencia, Admin |
+| `/kpi`, `/clientes`, `/estructural`, `/informe/mensual` | Gerencia, Admin |
+| `/usuarios`, `/accesos`, `/docs` | **Solo Admin** |
+| `/pipeline/ejecutar` | **Solo Admin** |
+
+**`/pipeline/ejecutar` merece el aparte**: recarga la base entera y recibe la
+ruta del archivo en la petición. No es una consulta, es mantenimiento — y antes
+lo podía disparar cualquiera con sesión.
+
+Dos propiedades del diseño:
+
+- **Falla cerrado.** Una ruta que no esté en la tabla se niega a todo el mundo.
+  Agregar un endpoint y olvidar clasificarlo lo deja inaccesible, no expuesto.
+  Una prueba recorre las rutas que la propia API declara y falla si alguna
+  quedó sin asignar, así que la tabla no se puede quedar atrás.
+- **Las pestañas del dashboard salen de esa misma tabla.** `/identidad` devuelve
+  qué paneles ve el rol, derivados de `PERMISOS`; el JavaScript no repite la
+  lista. Con dos tablas, tarde o temprano una cambia y la otra no, y el
+  dashboard ofrecería una pestaña que el servidor va a rechazar.
+
+Esconder las pestañas ajenas **no es la protección** — el servidor responde 403
+igual, y así lo verifica la prueba. Es no ofrecer un botón que va a fallar.
+
+#### Decisiones que no conviene revertir
+
+- **Las claves se guardan con bcrypt**, nunca en claro. Un volcado de la base no
+  entrega ninguna clave, ni sirve para entrar a otros sistemas donde la persona
+  la haya reutilizado.
+- **Las sesiones viven en una tabla, no en un JWT.** Un JWT firmado vale hasta
+  que expira y no se puede anular: si alguien deja la empresa a las 10 de la
+  mañana, su token seguiría abriendo el dashboard. Con sesiones en tabla,
+  desactivar la cuenta corta el acceso **en la siguiente petición**. Verificado
+  por prueba.
+- **De la sesión solo se guarda el SHA-256 del token.** Mismo criterio que con
+  las claves: un volcado no debe entregar sesiones vivas listas para usar.
+- **`X-Usuario` se ignora por completo.** La identidad del historial sale de la
+  sesión, así que el cliente no puede decidir quién firma un cambio. Es la
+  diferencia entre un rastro de auditoría confiable y uno que solo lo parece —
+  y este puede terminar sustentando una respuesta ante el Ministerio del
+  Trabajo.
+- **No se puede dejar el sistema sin `ADMIN`.** Ni desactivando al último, ni
+  degradándolo, ni haciéndolo con la propia cuenta.
+- **Las cuentas se desactivan, nunca se borran.** El historial seguiría
+  apuntando a ellas y hay que poder responder quién hizo cada cambio.
+
+```bash
+python test_api_identidad.py --con-escritura    # 44 comprobaciones
+```
+
+> **En el servidor, `COOKIE_SEGURA=1`** (el default). Sin eso la cookie de
+> sesión viaja en claro y cualquiera en la red la puede copiar. Solo se pone en
+> `0` para desarrollo local por HTTP.
 
 ## El ciclo de trabajo
 
@@ -406,14 +483,11 @@ Detalles que ya están resueltos en los archivos y conviene no revertir:
   el rango se correría un mes entero. **Hay que fijarla también en el host**
   (`sudo timedatectl set-timezone America/Bogota`), porque `OnCalendar` de
   systemd usa la zona del sistema, no la del contenedor.
-- **La API se publica en `127.0.0.1`, no en `0.0.0.0`.** No es porque falte la
-  autenticación —ya está (`MODO_IDENTIDAD=PROXY`)— sino porque **su default es
-  el modo declarativo**, y en ese modo cualquiera podría firmar una
-  justificación con el nombre de otro. Olvidar la variable no produce ningún
-  error, así que el binding a loopback es lo único que impide que un despliegue
-  distraído quede expuesto en modo declarativo. Delante va un proxy que
-  autentica de verdad. Para red interna cerrada, `API_BIND=0.0.0.0` en `.env`,
-  a sabiendas.
+- **La API se publica en `127.0.0.1`, no en `0.0.0.0`.** No es porque falte
+  autenticación —el login propio ya cierra todas las rutas— sino por el TLS:
+  delante debe ir un proxy que termine HTTPS, porque sin él la cookie de sesión
+  viaja en claro y cualquiera en la red la puede copiar. Para red interna
+  cerrada, `API_BIND=0.0.0.0` en `.env`, a sabiendas.
 - **`shm_size: 1gb` en el pipeline.** Chromium necesita más que los 64 MB de
   `/dev/shm` que da Docker por defecto; sin esto se cae a mitad de la descarga
   con errores que no apuntan a la causa (`Target closed`).

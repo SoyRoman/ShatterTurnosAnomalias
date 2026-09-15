@@ -476,29 +476,45 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
   motor con `--cedula` o `--desde/--hasta` marcaría como resuelto todo lo demás,
   que ni siquiera se evaluó.
 
-- **La identidad del usuario es declarativa POR DEFECTO, y eso sigue siendo una
-  trampa.** `API_TOKEN` autentica al *sistema* que llama (el dashboard), no a la
-  *persona*. Para la persona hay dos modos en `MODO_IDENTIDAD`:
-  - `DECLARATIVA` (default): se cree la cabecera `X-Usuario`. Nadie verifica
-    que quien la envía sea quien dice. **Solo aceptable en red interna
-    cerrada**, y la API lo avisa por consola al arrancar.
-  - `PROXY`: la identidad se lee de `CABECERA_IDENTIDAD`, puesta por un proxy
-    que ya autenticó a la persona. **`X-Usuario` se ignora** y su ausencia es
-    `403`. Es lo que hay que activar para exponer el dashboard.
-  - **El default es el modo inseguro a propósito**, para no romper la operación
-    actual en red interna. Eso significa que *no ponerlo* es un fallo
-    silencioso: la API arranca y funciona igual. Por eso
-    `docker-compose.yml` no publica puerto al host — la única barrera real
-    contra desplegar en modo declarativo es que no haya por dónde llegar.
-  - **Nunca añadas una caída de vuelta a `X-Usuario` en modo `PROXY`.** Sería
-    justo el agujero que el modo cierra: bastaría alcanzar la API sin pasar por
-    el proxy para firmar como cualquiera. Protegido por
-    `test_api_identidad.py`; si esa prueba empieza a dar `404` donde espera
-    `403`, el agujero volvió.
-  - La confianza en una cabecera plana se sostiene **por la red**, no por
-    criptografía. Si algún día la API queda alcanzable directamente, hay que
-    verificar el JWT firmado (`Cf-Access-Jwt-Assertion` en Cloudflare Access,
-    `x-amzn-oidc-data` en ALB+Cognito).
+- **La identidad del historial sale de la SESION, nunca del cliente.** La
+  autenticacion es propia (decision explicita del usuario, septiembre 2026: sin
+  proveedores externos). `MODO_IDENTIDAD` tiene dos valores:
+  - `SESION` (default): login propio. **Ninguna ruta responde sin sesion**, ni
+    `/`, ni `/docs`, ni `/openapi.json`. Lo garantiza el middleware
+    `muro_de_sesion`, no una lista de rutas protegidas una por una — con la
+    lista, agregar un endpoint y olvidar la dependencia lo dejaria abierto y
+    nada fallaria.
+  - `DECLARATIVA`: sin login, se cree `X-Usuario`. **Solo desarrollo local**; la
+    API avisa por consola al arrancar.
+  - **Nunca aceptes `X-Usuario` como alternativa en modo `SESION`.** Seria el
+    agujero que todo esto cierra: bastaria enviar esa cabecera para firmar una
+    justificacion con el nombre de otro, y `anomalias_historial` puede terminar
+    sustentando una respuesta ante el Ministerio del Trabajo. Un historial que
+    parece confiable y no lo es es peor que no tener historial. Protegido por
+    `test_api_identidad.py`.
+  - **Las sesiones viven en tabla, no en un JWT**, y eso no es accidental: un
+    JWT firmado vale hasta que expira y no se puede anular, asi que desactivar
+    una cuenta no cortaria el acceso. Con la tabla se corta en la siguiente
+    peticion. Si alguien propone cambiarlo "para simplificar", la prueba lo
+    detecta.
+  - De la sesion solo se guarda el **SHA-256** del token, y de la clave solo su
+    hash **bcrypt**. Un volcado de la base no entrega ni claves ni sesiones
+    vivas.
+
+- **La autorizacion por URL vive en una TABLA y falla cerrado.** `PERMISOS` en
+  `api.py` dice que roles alcanzan cada ruta, y el mismo middleware la aplica.
+  - Una ruta que no este en la tabla **se niega a todo el mundo**. Agregar un
+    endpoint y olvidar clasificarlo lo deja inaccesible, nunca expuesto. Hay una
+    prueba que recorre las rutas declaradas por la API y falla si alguna quedo
+    sin asignar: la tabla no se puede quedar atras.
+  - `/pipeline/ejecutar` es **solo ADMIN**. Recarga la base entera y recibe la
+    ruta del archivo en la peticion: no es una consulta, es mantenimiento. Antes
+    lo podia disparar cualquiera con sesion.
+  - **Las pestanas del dashboard se derivan de esa misma tabla** (`/identidad`
+    devuelve `paneles`). No repitas la lista de roles en el JavaScript: con dos
+    tablas, una cambia y la otra no, y el dashboard ofreceria una pestana que el
+    servidor va a rechazar. Esconder una pestana no es la proteccion — el 403
+    del servidor lo es.
 
 - **`motor_reglas.py` escanea con el umbral de la versión de regla más
   reciente**, no una por cada fecha. Cada violación puntual sí se guarda con
@@ -653,16 +669,19 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
    referencia **no es ilegal** en vigilancia (la Ley 1920 permite hasta 60h con
    suplementarias, y ese tope sí lo cubre `SEMANA_SUPERA_60H`); lo que exige es
    pagarlas con recargo y registrarlas. Es asunto de liquidación.
-8. ~~**Autenticación real**~~ — **código hecho** (septiembre 2026). Dos modos
-   en `MODO_IDENTIDAD` (`DECLARATIVA` / `PROXY`) con `CABECERA_IDENTIDAD`
-   configurable, así que sirve igual para Cloudflare Access o ALB+Cognito y la
-   decisión de infraestructura no bloqueó el código. Probado con
-   `test_api_identidad.py` (14 comprobaciones, cero escrituras en la base).
-   En el mismo cambio se arregló que `/anomalias` ignorara en silencio los
-   parámetros desconocidos: ahora responde 422.
-   **Falta configurar Cloudflare Access** y poner `MODO_IDENTIDAD=PROXY` en el
-   servidor — ver `despliegue/CLOUDFLARE.md`. Ojo: el default es el modo
-   inseguro, así que olvidarlo no da ningún error (ver §7).
+8. ~~**Autenticación real**~~ — **hecha, y es propia** (septiembre 2026).
+   Decision explicita del usuario: nada de proveedores externos, todo dentro del
+   sistema. Login con claves bcrypt, sesiones en servidor, roles que reutilizan
+   la taxonomia de las bandejas (PROGRAMADOR / NOMINA / GERENCIA + ADMIN),
+   bloqueo por intentos fallidos y bitacora de accesos.
+   Piezas: `autenticacion.py`, `migracion_004_usuarios.sql`,
+   `gestionar_usuarios.py`, `login.html`, y la pestana «Cuentas» del dashboard.
+   El ADMIN crea las cuentas y entrega una clave temporal que el sistema obliga
+   a cambiar al primer ingreso.
+   Probado con `test_api_identidad.py` (44 comprobaciones): ninguna ruta
+   responde sin sesion, los roles se respetan, desactivar corta el acceso al
+   instante y la cabecera no puede suplantar a la sesion.
+   **Cloudflare Access quedo descartado** y su guia eliminada — no la recrees.
 9. **Despliegue en AWS — pendiente.** Decidido (septiembre 2026): **se queda en
    PostgreSQL**, sobre RDS, en la misma cuenta de AWS que el resto. Se evaluó
    meter el esquema en el MySQL de la empresa (`bitacorapp_staging`, el único
@@ -683,10 +702,6 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
     importa (segundos), pero contra una BD remota son ~8.400 idas y vueltas por
     mes. Si el RDS queda en la misma VPC deja de ser urgente; si alguna vez la
     BD queda lejos, es lo primero que hay que arreglar.
-11. **`/anomalias` ignora en silencio los parámetros desconocidos.** Un
-    `?cedula=X` en vez de `?busqueda=X` no da error: devuelve la primera página
-    sin filtrar, como si el filtro se hubiera aplicado. Ya provocó una
-    confusión real durante las pruebas. Debe responder 422.
 12. **Los tres correos por audiencia** que hacía el flujo de n8n eliminado. El
     payload sigue en `/informe/mensual`.
 13. **Migración a la API de SERPI** cuando exista: cambiar la fuente del ETL,
