@@ -185,6 +185,46 @@ def auth_rutas_libres():
     return api.RUTAS_LIBRES
 
 
+def probar_guarda_cookie_segura():
+    """COOKIE_SEGURA=1 sobre HTTP tiene que fallar RUIDOSAMENTE.
+
+    Sin esta guarda el login responde 200, el navegador descarta la cookie
+    `Secure` porque llego por HTTP, y la pantalla siguiente dice "sesion no
+    iniciada o vencida" sin ninguna pista de la causa. Paso de verdad al
+    desplegar en otro equipo y costo un rato largo de diagnostico.
+
+    Se prueba con la funcion y no levantando otro servidor porque lo que
+    importa es la decision, y asi la prueba no depende de tener una IP de red.
+    """
+    print("=== La guarda de COOKIE_SEGURA ===")
+    import api
+
+    class _Falsa:
+        def __init__(self, esquema, host, cabeceras=None):
+            self.url = type('U', (), {'scheme': esquema, 'hostname': host})()
+            self.headers = cabeceras or {}
+
+    # localhost es contexto seguro para los navegadores: ahi SI aceptan una
+    # cookie Secure por HTTP, y por eso el problema no aparece en desarrollo.
+    comprobar("http://localhost se considera seguro",
+              api.conexion_segura(_Falsa('http', 'localhost')), True)
+    comprobar("http://127.0.0.1 tambien",
+              api.conexion_segura(_Falsa('http', '127.0.0.1')), True)
+    # Por IP, no. Es el caso que rompia.
+    comprobar("http por IP NO es seguro",
+              api.conexion_segura(_Falsa('http', '192.168.1.50')), False)
+    comprobar("https si",
+              api.conexion_segura(_Falsa('https', '192.168.1.50')), True)
+    # Detras de un proxy que termina TLS la peticion llega como HTTP; sin
+    # honrar X-Forwarded-Proto la API se negaria justo en produccion.
+    comprobar("X-Forwarded-Proto=https manda sobre el esquema local",
+              api.conexion_segura(_Falsa('http', 'app.empresa.com',
+                                         {'x-forwarded-proto': 'https'})), True)
+    comprobar("X-Forwarded-Proto=http se respeta",
+              api.conexion_segura(_Falsa('https', 'app.empresa.com',
+                                         {'x-forwarded-proto': 'http'})), False)
+
+
 def probar_clasificacion():
     """Ninguna ruta de la API puede quedar fuera de la tabla de permisos.
 
@@ -412,6 +452,7 @@ def main():
         sembrar(cur)
         proceso = arrancar()
 
+        probar_guarda_cookie_segura()
         cookie_admin = probar_login()
         probar_clasificacion()
         probar_muro(cookie_admin)

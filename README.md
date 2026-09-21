@@ -261,12 +261,38 @@ igual, y así lo verifica la prueba. Es no ofrecer un botón que va a fallar.
   apuntando a ellas y hay que poder responder quién hizo cada cambio.
 
 ```bash
-python test_api_identidad.py --con-escritura    # 44 comprobaciones
+python test_api_identidad.py --con-escritura    # 50 comprobaciones
 ```
 
-> **En el servidor, `COOKIE_SEGURA=1`** (el default). Sin eso la cookie de
-> sesión viaja en claro y cualquiera en la red la puede copiar. Solo se pone en
-> `0` para desarrollo local por HTTP.
+#### «Sesión no iniciada o vencida» justo después de entrar
+
+Si el login responde bien pero la pantalla siguiente dice que no hay sesión, es
+**`COOKIE_SEGURA`**. Esa variable marca la cookie como `Secure`, y una cookie
+`Secure` que llega por HTTP el navegador **la descarta sin avisar**:
+
+| Cómo abres la app | `COOKIE_SEGURA=1` |
+|---|---|
+| `http://localhost:8000` | Funciona — los navegadores tratan *localhost* como contexto seguro |
+| `http://<IP>:8000` | **Falla** — la cookie se descarta y no queda sesión |
+| `https://...` | Funciona |
+
+Por eso no se nota en la máquina de desarrollo y sí al abrir la app por IP desde
+otro equipo. Dos salidas:
+
+```bash
+COOKIE_SEGURA=0    # red interna sin TLS: desbloquea, pero la cookie va en claro
+```
+
+…o poner un proxy con HTTPS delante, que es lo correcto en el servidor.
+
+**La API ya no deja que esto falle en silencio:** si `COOKIE_SEGURA=1` y la
+petición llegó por HTTP sin ser localhost, `/login` responde **500 con la
+explicación** en vez de entregar una cookie que el navegador va a tirar. Honra
+`X-Forwarded-Proto`, así que detrás de un proxy que termina TLS sigue
+funcionando.
+
+> **En el servidor, deja `COOKIE_SEGURA=1`** (el default). Sin eso la cookie de
+> sesión viaja en claro y cualquiera en la red la puede copiar.
 
 ## El ciclo de trabajo
 

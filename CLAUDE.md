@@ -501,6 +501,20 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
     hash **bcrypt**. Un volcado de la base no entrega ni claves ni sesiones
     vivas.
 
+- **`COOKIE_SEGURA=1` sobre HTTP mata la sesion en silencio.** Una cookie
+  marcada `Secure` que llega por HTTP la descarta el navegador sin avisar: el
+  login responde 200 y la pantalla siguiente dice «sesion no iniciada o
+  vencida», sin ninguna pista de la causa. Paso al desplegar en otro equipo.
+  - **No se nota en desarrollo** porque los navegadores tratan `localhost` como
+    contexto seguro y ahi SI aceptan cookies `Secure` por HTTP. Aparece al
+    abrir la app por IP desde otra maquina.
+  - El default de `.env.example` es `1`, que es lo correcto para el servidor
+    pero rompe cualquier prueba por IP sin TLS.
+  - Ya no falla callado: `conexion_segura()` lo detecta y `/login` responde 500
+    con la explicacion. **Honra `X-Forwarded-Proto`**, asi que detras de un
+    proxy que termina TLS la API no se niega — sin eso se romperia justo en
+    produccion. Protegido por `test_api_identidad.py`.
+
 - **La autorizacion por URL vive en una TABLA y falla cerrado.** `PERMISOS` en
   `api.py` dice que roles alcanzan cada ruta, y el mismo middleware la aplica.
   - Una ruta que no este en la tabla **se niega a todo el mundo**. Agregar un
@@ -678,7 +692,7 @@ Cosas que ya costaron trabajo descubrir. No las repitas.
    `gestionar_usuarios.py`, `login.html`, y la pestana «Cuentas» del dashboard.
    El ADMIN crea las cuentas y entrega una clave temporal que el sistema obliga
    a cambiar al primer ingreso.
-   Probado con `test_api_identidad.py` (44 comprobaciones): ninguna ruta
+   Probado con `test_api_identidad.py` (50 comprobaciones): ninguna ruta
    responde sin sesion, los roles se respetan, desactivar corta el acceso al
    instante y la cabecera no puede suplantar a la sesion.
    **Cloudflare Access quedo descartado** y su guia eliminada — no la recrees.

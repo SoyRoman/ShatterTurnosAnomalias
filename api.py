@@ -110,6 +110,15 @@ async def ciclo_de_vida(app: FastAPI):
             cn.commit()
         print(f"Identidad en modo SESION. {n} sesion(es) vencida(s) purgada(s).",
               file=sys.stderr)
+        if COOKIE_SEGURA:
+            print("  COOKIE_SEGURA=1: la cookie de sesion exige HTTPS. Si abres la "
+                  "app por http:// con una IP, el navegador la descartara y el "
+                  "login no dejara sesion. Para red interna sin TLS: "
+                  "COOKIE_SEGURA=0 en el .env.", file=sys.stderr)
+        else:
+            print("  ADVERTENCIA: COOKIE_SEGURA=0, la cookie de sesion viaja en "
+                  "claro. Solo para desarrollo o red interna cerrada.",
+                  file=sys.stderr)
         if not hay_admin:
             print("ADVERTENCIA: no hay ningun ADMIN activo, asi que nadie puede "
                   "gestionar cuentas. Crea el primero con: "
@@ -159,6 +168,34 @@ def _contexto(peticion: Request):
     reenviada = (peticion.headers.get('x-forwarded-for') or '').split(',')[0].strip()
     ip = reenviada or (peticion.client.host if peticion.client else None)
     return ip, peticion.headers.get('user-agent')
+
+
+def conexion_segura(peticion: Request) -> bool:
+    """Si el NAVEGADOR considera segura esta conexion.
+
+    Importa porque una cookie marcada `Secure` que llega por HTTP se descarta
+    en silencio: el login responde 200, no queda sesion, y la peticion
+    siguiente dice "sesion no iniciada". Sin este chequeo el sintoma no apunta
+    a la causa y se pierden horas.
+
+    Tres casos, en orden:
+
+    1. `X-Forwarded-Proto`, que pone el proxy que termina TLS. Hay que mirarlo
+       primero: detras de nginx o un ALB, la peticion llega al proceso como
+       HTTP aunque el usuario este usando HTTPS, y sin esto la API se negaria a
+       funcionar justo en produccion.
+    2. El esquema de la propia peticion.
+    3. localhost. Los navegadores lo tratan como contexto seguro y SI aceptan
+       cookies `Secure` por HTTP ahi — que es exactamente por lo que este
+       problema no aparece en la maquina de desarrollo y si al abrir la app por
+       IP desde otro equipo.
+    """
+    reenviado = (peticion.headers.get('x-forwarded-proto') or '').split(',')[0].strip().lower()
+    if reenviado:
+        return reenviado == 'https'
+    if peticion.url.scheme == 'https':
+        return True
+    return (peticion.url.hostname or '').lower() in ('localhost', '127.0.0.1', '::1')
 
 
 def verificar_token(x_api_token: Optional[str] = Header(None)):
@@ -408,6 +445,20 @@ def iniciar_sesion(credenciales: Credenciales, peticion: Request):
     """
     if MODO_IDENTIDAD != 'SESION':
         raise HTTPException(status_code=404, detail="El login no esta activo en este modo")
+
+    # Fallar AQUI y no despues. Con COOKIE_SEGURA=1 sobre HTTP, el navegador
+    # descarta la cookie sin avisar: el login diria 200 y la pantalla siguiente
+    # "sesion no iniciada o vencida", sin ninguna pista de la causa.
+    if COOKIE_SEGURA and not conexion_segura(peticion):
+        raise HTTPException(
+            status_code=500,
+            detail="COOKIE_SEGURA=1 exige HTTPS, y esta peticion llego por HTTP. "
+                   "El navegador descartaria la cookie de sesion y el login no "
+                   "serviria de nada. Dos salidas: pon un proxy con HTTPS delante "
+                   "(lo correcto en el servidor), o COOKIE_SEGURA=0 en el .env si "
+                   "esto es una prueba en red interna — a sabiendas de que la "
+                   "cookie viajaria en claro y cualquiera en esa red podria "
+                   "copiarla.")
 
     ip, agente = _contexto(peticion)
     generico = "Usuario o clave incorrectos"
