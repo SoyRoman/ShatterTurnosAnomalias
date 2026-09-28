@@ -1,0 +1,309 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Shatter turnos anomaly system. RDS PostgreSQL 18 (private) + Ubuntu EC2
+  (SSM, no SSH). Does not touch bitacorapp-mysql or the company VPC.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0550bca5b3992f654
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: "subnet-0c8fef7003c3563e9,subnet-0d779a2c720e03313"
+  InstanceSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0c8fef7003c3563e9
+  EngineVersion:
+    Type: String
+    Default: "18.6"
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  AppInstanceType:
+    Type: String
+    Default: t3.small
+
+Resources:
+  RdsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encryption for turnos RDS, Performance Insights, and logs
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: Logs
+            Effect: Allow
+            Principal:
+              Service: !Sub logs.${AWS::Region}.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+          - Sid: Rds
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:DescribeKey
+            Resource: "*"
+  RdsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/turnos-rds
+      TargetKeyId: !Ref RdsKey
+
+  DeployBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub shatter-turnos-deploy-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-artifacts
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: turnos-app
+      GroupDescription: EC2 for turnos API and daily pipeline. No SSH. HTTPS public.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP ACME challenge and redirect to HTTPS
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS public dashboard
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: SERPI download, RDS, SSM, package updates
+      Tags:
+        - Key: Name
+          Value: sg-turnos-app
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: turnos-db
+      GroupDescription: RDS PostgreSQL. 5432 only from the app SG.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+          Description: PostgreSQL from turnos app
+      Tags:
+        - Key: Name
+          Value: sg-turnos-db
+
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: turnos-ec2
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: turnos-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ParameterStore
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:PutParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/turnos*
+              - Sid: RdsMasterSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!db-*
+              - Sid: DecryptRdsKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt RdsKey.Arn
+              - Sid: DeployArtifact
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::shatter-turnos-deploy-${AWS::AccountId}/*
+              - Sid: DeployList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub arn:aws:s3:::shatter-turnos-deploy-${AWS::AccountId}
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: turnos-ec2
+      Roles:
+        - !Ref Ec2Role
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: turnos-db-subnets
+      DBSubnetGroupDescription: Default VPC subnets in two AZs
+      SubnetIds: !Ref SubnetIds
+
+  DbParamGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Force TLS for turnos PostgreSQL
+      Family: postgres18
+      Parameters:
+        rds.force_ssl: "1"
+
+  TurnosDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: turnos-db
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !GetAtt RdsKey.Arn
+      PubliclyAccessible: false
+      MultiAZ: false
+      MasterUsername: turnos_admin
+      ManageMasterUserPassword: true
+      MasterUserSecret:
+        KmsKeyId: !Ref RdsKey
+      DBName: turnos
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroup
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      DBParameterGroupName: !Ref DbParamGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "08:00-09:00"
+      PreferredMaintenanceWindow: "sun:09:00-sun:10:00"
+      DeletionProtection: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      PerformanceInsightsKMSKeyId: !GetAtt RdsKey.Arn
+      EnableCloudwatchLogsExports:
+        - postgresql
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: turnos-db
+        - Key: created_by
+          Value: rds-oss-skill
+        - Key: generation_model
+          Value: cursor-grok-4.6
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: "{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}"
+      InstanceType: !Ref AppInstanceType
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      EbsOptimized: true
+      SubnetId: !Ref InstanceSubnetId
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        HttpEndpoint: enabled
+      Monitoring: true
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -eux
+          timedatectl set-timezone America/Bogota
+          snap start amazon-ssm-agent || true
+      Tags:
+        - Key: Name
+          Value: turnos-app
+
+  AppEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref AppInstance
+      Tags:
+        - Key: Name
+          Value: turnos-app
+
+Outputs:
+  VpcId:
+    Value: !Ref VpcId
+  AppSecurityGroupId:
+    Value: !Ref AppSecurityGroup
+  DbSecurityGroupId:
+    Value: !Ref DbSecurityGroup
+  DbEndpoint:
+    Value: !GetAtt TurnosDB.Endpoint.Address
+  InstanceId:
+    Value: !Ref AppInstance
+  ElasticIp:
+    Value: !Ref AppEip
+  DeployBucket:
+    Value: !Ref DeployBucket
+  MasterSecretArn:
+    Value: !GetAtt TurnosDB.MasterUserSecret.SecretArn

@@ -1,0 +1,21 @@
+[Unit]
+Description=Caddy reverse proxy for turnos (HTTPS)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=root
+ExecStart=/usr/local/bin/caddy run --config /opt/turnos/despliegue/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /opt/turnos/despliegue/Caddyfile --adapter caddyfile
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/caddy /opt/turnos/despliegue
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=HOME=/var/lib/caddy
+Environment=XDG_DATA_HOME=/var/lib/caddy
+
+[Install]
+WantedBy=multi-user.target

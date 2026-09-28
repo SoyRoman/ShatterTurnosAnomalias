@@ -1,0 +1,9 @@
+# Reverse proxy. The API stays on 127.0.0.1:8000.
+# Replace the hostname with the company domain when DNS is ready, then:
+#   sudo systemctl reload caddy
+#
+# Temporary hostname (Elastic IP): 100.62.231.162.sslip.io
+
+100.62.231.162.sslip.io {
+	reverse_proxy 127.0.0.1:8000
+}
