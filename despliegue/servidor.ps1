@@ -7,7 +7,8 @@
       estado            Version publicada, API, timer y ultima corrida del pipeline
       logs              Bitacora de las ultimas corridas del pipeline
       logs-api          Ultimas lineas de la API
-      pipeline          Lanza una corrida del pipeline ahora (descarga SERPI + ETL + motor)
+      pipeline          Lanza una corrida del pipeline ahora (descarga SERPI + ETL + motor).
+                        Sin fechas: mes actual + siguiente. Con -Desde/-Hasta: ese rango
       usuarios          Lista las cuentas del dashboard
       crear-usuario     Crea una cuenta con clave temporal (se muestra una vez)
       restablecer-clave Da una clave temporal nueva a una cuenta
@@ -19,6 +20,8 @@
     .\despliegue\servidor.ps1 crear-usuario -Usuario mperez -Nombre "Maria Perez" -Rol PROGRAMADOR
 .EXAMPLE
     .\despliegue\servidor.ps1 pipeline
+.EXAMPLE
+    .\despliegue\servidor.ps1 pipeline -Desde 2026-08-01 -Hasta 2026-10-31
 #>
 param(
     [Parameter(Mandatory, Position = 0)]
@@ -29,6 +32,8 @@ param(
     [string] $Nombre,
     [ValidateSet('ADMIN', 'PROGRAMADOR', 'NOMINA', 'GERENCIA')] [string] $Rol,
     [string] $Correo,
+    [ValidatePattern('^\d{4}-\d{2}-\d{2}$')] [string] $Desde,
+    [ValidatePattern('^\d{4}-\d{2}-\d{2}$')] [string] $Hasta,
     [int] $Lineas = 80
 )
 
@@ -62,7 +67,14 @@ echo; echo "== Disco =="; df -h / | tail -1
 '@
     }
     'logs' {
-        Invoke-EnServidor -Comentario 'logs pipeline' -Bash "journalctl -u turnos-pipeline.service --no-pager -n $Lineas -o cat"
+        # La bitacora propia del pipeline trae TODAS las corridas, tambien las
+        # manuales con fechas (que no pasan por turnos-pipeline.service). El
+        # journal se agrega porque ahi quedan los fallos de arranque, cuando el
+        # pipeline murio antes de poder escribir su bitacora.
+        Invoke-EnServidor -Comentario 'logs pipeline' -Bash @"
+echo '== Bitacora del pipeline =='; tail -n $Lineas logs/pipeline_diario.log 2>/dev/null || echo '(todavia no hay bitacora)'
+echo; echo '== Journal (fallos de arranque) =='; journalctl -u 'turnos-pipeline*' --no-pager -n 15 -o short-iso | grep -vE '^\s*$' || true
+"@
     }
     'logs-api' {
         Invoke-EnServidor -Comentario 'logs api' -Bash "sudo -u turnos docker compose logs --no-color --tail $Lineas api"
@@ -70,10 +82,18 @@ echo; echo "== Disco =="; df -h / | tail -1
     'pipeline' {
         # Corre en segundo plano en el servidor: tarda 10-30 min (SERPI es lento)
         # y no hace falta tener esta ventana abierta. Seguirlo con 'logs'.
-        Invoke-EnServidor -Comentario 'pipeline manual' -Bash @'
-systemctl start --no-block turnos-pipeline.service
-echo "Corrida lanzada. Sigue el avance con:  .\despliegue\servidor.ps1 logs"
-'@
+        if ([bool]$Desde -ne [bool]$Hasta) { throw '-Desde y -Hasta van juntos.' }
+        if (-not $Desde) {
+            Invoke-EnServidor -Comentario 'pipeline manual' -Bash 'systemctl start --no-block turnos-pipeline.service'
+        } else {
+            # Mismo usuario, carpeta e imagen que el .service, como unidad
+            # transitoria: sobrevive a que se cierre esta ventana, y el candado
+            # del pipeline impide que se pise con la corrida de las 04:30.
+            Invoke-EnServidor -Comentario "pipeline $Desde a $Hasta" -Bash @"
+systemd-run --unit=turnos-pipeline-manual-`$(date +%Y%m%d%H%M%S) --uid=turnos --gid=turnos --working-directory=/opt/turnos --property=TimeoutStartSec=2h /usr/bin/docker compose --profile manual run --rm pipeline --desde $Desde --hasta $Hasta
+"@
+        }
+        Write-Host 'Corrida lanzada. Sigue el avance con:  .\despliegue\servidor.ps1 logs'
     }
     'usuarios' {
         Invoke-ComposeEnServidor 'gestionar_usuarios.py listar'
