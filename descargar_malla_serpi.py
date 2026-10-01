@@ -62,7 +62,11 @@ def descargar_xls_crudo(usuario, clave, fecha_desde, fecha_hasta, ruta_salida, t
     )
 
     with sync_playwright() as p:
-        navegador = p.chromium.launch(headless=headless)
+        # NAVEGADOR_CANAL=chrome|msedge usa el navegador ya instalado en el
+        # equipo, para cuando `playwright install chromium` no puede descargar
+        # (proxy/firewall). Vacio = el Chromium propio de Playwright.
+        canal = os.environ.get("NAVEGADOR_CANAL") or None
+        navegador = p.chromium.launch(headless=headless, channel=canal)
         contexto = navegador.new_context(accept_downloads=True)
         pagina = contexto.new_page()
 

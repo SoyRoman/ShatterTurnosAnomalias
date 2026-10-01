@@ -61,12 +61,16 @@ EXPOSE 8000
 # El healthcheck usa /reglas y no /kpi: /reglas toca la BD (asi que un fallo de
 # conexion se detecta) pero lee 7 filas de catalogo, sin los joins del read
 # model. Un healthcheck cada 30 s no deberia costar un agregado sobre turnos.
-# Si API_TOKEN esta definido, /reglas responde 401 — que igual prueba que el
-# proceso esta vivo y sirviendo, que es lo que el healthcheck mide.
+# Con login (MODO_IDENTIDAD=SESION, o API_TOKEN definido) /reglas responde 401
+# a quien no trae sesion — que igual prueba que el proceso esta vivo y
+# sirviendo, que es lo que el healthcheck mide. Se usa http.client y no urllib
+# porque urllib LANZA excepcion ante un 401: con urllib el contenedor quedaba
+# "unhealthy" para siempre estando sano (visto en produccion, 2026-10-01).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request,sys; \
-        r=urllib.request.urlopen('http://127.0.0.1:8000/reglas', timeout=4); \
-        sys.exit(0)" || exit 1
+    CMD python -c "import http.client,sys; \
+        c=http.client.HTTPConnection('127.0.0.1', 8000, timeout=4); \
+        c.request('GET', '/reglas'); \
+        sys.exit(0 if c.getresponse().status in (200, 401, 403) else 1)" || exit 1
 
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
 

@@ -42,6 +42,9 @@ tar -xzf /tmp/app.tar.gz -C "$APP_DIR"
 rm -f /tmp/app.tar.gz
 mkdir -p "$APP_DIR/logs" "$APP_DIR/Reportes mensuales"
 chown -R turnos:turnos "$APP_DIR"
+# Los volumenes los escribe el uid del CONTENEDOR (10001, ver Dockerfile), no el
+# `turnos` del host. Ver actualizar.sh.
+chown -R 10001:10001 "$APP_DIR/logs" "$APP_DIR/Reportes mensuales"
 
 echo "== .env from Parameter Store =="
 python3 - <<'PY'

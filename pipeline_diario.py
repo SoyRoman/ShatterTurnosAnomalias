@@ -156,6 +156,26 @@ def rango_por_defecto(meses):
     return primero.isoformat(), ultimo.isoformat()
 
 
+def meses_del_rango(desde, hasta):
+    """Parte [desde, hasta] en tramos de un mes calendario: [(desde, hasta), ...].
+
+    SERPI NO sabe entregar más de un mes por reporte. Pedido 2026-08-01 →
+    2026-09-30 devuelve UNA sola grilla de 31 días con la disposición de agosto
+    (el día 1 cae en sábado) pero rotulada «Mes: Septiembre» — el ETL la fecha
+    como septiembre y revienta en «2026-09-31» (visto el 2026-10-01). Peor que
+    el error sería que no reventara: con dos meses de 30 días cargaría turnos
+    en el mes equivocado sin avisar. Por eso se descarga mes por mes.
+    """
+    d = dt.date.fromisoformat(desde)
+    fin = dt.date.fromisoformat(hasta)
+    tramos = []
+    while d <= fin:
+        ultimo_mes = dt.date(d.year, d.month, calendar.monthrange(d.year, d.month)[1])
+        tramos.append((d.isoformat(), min(ultimo_mes, fin).isoformat()))
+        d = ultimo_mes + dt.timedelta(days=1)
+    return tramos
+
+
 def ejecutar(etiqueta, argumentos, timeout_s):
     """Corre un paso y vuelca su salida a la bitácora línea por línea.
 
@@ -297,41 +317,50 @@ def main():
         return 6
 
     try:
-        # ---- 1/3 descarga -------------------------------------------------
+        # ---- 1/3 descarga y 2/3 ETL, un mes a la vez ----------------------
+        # (ver meses_del_rango: SERPI no entrega más de un mes por reporte).
+        # Un --archivo se carga tal cual: ya es un reporte de SERPI, de un mes.
         if args.archivo:
-            ruta_malla = os.path.abspath(args.archivo)
-            if not os.path.exists(ruta_malla):
-                log.error("No existe el archivo indicado: %s", ruta_malla)
+            ruta = os.path.abspath(args.archivo)
+            if not os.path.exists(ruta):
+                log.error("No existe el archivo indicado: %s", ruta)
                 return 1
-            log.info("1/3 DESCARGA omitida: se usa %s", ruta_malla)
+            log.info("1/3 DESCARGA omitida: se usa %s", ruta)
+            tramos = [(desde, hasta, ruta)]
         else:
             os.makedirs(DIR_REPORTES, exist_ok=True)
-            ruta_malla = ruta_de_hoy(desde, hasta)
-            if not paso_descarga(desde, hasta, ruta_malla, args.timeout_min,
-                                 args.reintentos, args.espera_reintento):
-                return 2
-            log.info("Malla del día guardada en %s (%.0f KB)",
-                     ruta_malla, os.path.getsize(ruta_malla) / 1024)
+            tramos = [(d, h, ruta_de_hoy(d, h)) for d, h in meses_del_rango(desde, hasta)]
+
+        for tramo_desde, tramo_hasta, ruta_malla in tramos:
+            if not args.archivo:
+                if not paso_descarga(tramo_desde, tramo_hasta, ruta_malla, args.timeout_min,
+                                     args.reintentos, args.espera_reintento):
+                    return 2
+                log.info("Malla del día guardada en %s (%.0f KB)",
+                         ruta_malla, os.path.getsize(ruta_malla) / 1024)
+
+            if args.solo_descarga:
+                continue
+
+            rc, salida = ejecutar(f"2/3 ETL {tramo_desde} → {tramo_hasta} "
+                                  "(normalización + reconciliación)", [
+                sys.executable, "etl_normalizacion.py",
+                "--archivo", ruta_malla,
+                "--umbral-borrado", str(args.umbral_borrado),
+            ], timeout_s=60 * 60)
+            if rc != 0:
+                if MARCA_ABORTO_UMBRAL in salida:
+                    log.error("EL ETL SE ABORTÓ POR SEGURIDAD, la BD quedó intacta. "
+                              "Esto NO es un fallo del programa: la malla descargada "
+                              "difiere tanto de la BD que borrar sería sospechoso. "
+                              "Revisa el archivo archivado antes de forzar nada.")
+                    return 4
+                log.error("El ETL falló. La BD puede haber quedado sin los cambios de hoy.")
+                return 3
 
         if args.solo_descarga:
             log.info("--solo-descarga: la BD no se tocó. Fin.")
             return 0
-
-        # ---- 2/3 ETL ------------------------------------------------------
-        rc, salida = ejecutar("2/3 ETL (normalización + reconciliación)", [
-            sys.executable, "etl_normalizacion.py",
-            "--archivo", ruta_malla,
-            "--umbral-borrado", str(args.umbral_borrado),
-        ], timeout_s=60 * 60)
-        if rc != 0:
-            if MARCA_ABORTO_UMBRAL in salida:
-                log.error("EL ETL SE ABORTÓ POR SEGURIDAD, la BD quedó intacta. "
-                          "Esto NO es un fallo del programa: la malla descargada "
-                          "difiere tanto de la BD que borrar sería sospechoso. "
-                          "Revisa el archivo archivado antes de forzar nada.")
-                return 4
-            log.error("El ETL falló. La BD puede haber quedado sin los cambios de hoy.")
-            return 3
 
         # ---- 3/3 motor ----------------------------------------------------
         # Se acota al mismo rango que se cargó: `_acotar` aplica ese filtro a

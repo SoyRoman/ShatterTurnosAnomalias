@@ -1,0 +1,53 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UbicarLaEc2",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ComandosSoloEnLaEc2DeTurnos",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ec2:us-east-1:306005333749:instance/*",
+      "Condition": {
+        "StringEquals": { "aws:ResourceTag/Name": "turnos-app" }
+      }
+    },
+    {
+      "Sid": "SoloElDocumentoDeShell",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ssm:us-east-1::document/AWS-RunShellScript"
+    },
+    {
+      "Sid": "LeerResultados",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SubirVersiones",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::shatter-turnos-deploy-306005333749/releases/*",
+        "arn:aws:s3:::shatter-turnos-deploy-306005333749/app.tar.gz"
+      ]
+    },
+    {
+      "Sid": "ListarVersiones",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::shatter-turnos-deploy-306005333749"
+    }
+  ]
+}
