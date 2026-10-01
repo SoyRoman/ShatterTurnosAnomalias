@@ -1,0 +1,16 @@
+# Saltos de linea fijos, sin importar el core.autocrlf de quien publique.
+#
+# desplegar.ps1 empaqueta con `git archive`, que aplica la conversion de saltos
+# de linea del equipo. Desde un Windows con autocrlf=true, los .sh, el
+# Dockerfile, el Caddyfile y las unidades de systemd llegarian al servidor con
+# CRLF, y bash revienta con "$'\r': command not found".
+* text=auto eol=lf
+
+# Los scripts de PowerShell se quedan en CRLF, que es lo que espera Windows.
+*.ps1 text eol=crlf
+
+# Binarios: nunca convertir.
+*.xlsx binary
+*.xls binary
+*.png binary
+*.ico binary
