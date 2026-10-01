@@ -95,7 +95,15 @@ def find_year_month(ws, max_col):
                         for ccc in range(cc, len(row_vals)):
                             mes_val = row_vals[ccc]
                             if isinstance(mes_val, str) and mes_val.strip() in MESES:
-                                return int(anio), MESES[mes_val.strip()]
+                                # Un mes sin malla cargada en SERPI trae el
+                                # encabezado con otra disposicion y aqui cae
+                                # el rotulo «Mes:» en vez del año (visto con
+                                # noviembre, el 2026-10-01). Sin año valido la
+                                # hoja no se puede fechar: se descarta.
+                                try:
+                                    return int(anio), MESES[mes_val.strip()]
+                                except (TypeError, ValueError):
+                                    return None, None
     return None, None
 
 
@@ -499,6 +507,15 @@ def main():
     print(f"Leyendo {args.archivo} ...")
     records = parse_workbook(args.archivo)
     print(f"  {len(records)} asignaciones guarda-puesto encontradas")
+
+    # Un mes que SERPI todavia no tiene programado llega como un reporte vacio.
+    # No es un error (la corrida diaria siempre pide el mes siguiente, que se
+    # carga entre el 25 y el 27), y sobre todo NO se reconcilia: reconciliar
+    # contra un archivo vacio es pedir que se borre todo lo que haya.
+    if not any(r['turnos'] for r in records):
+        print("  El archivo no trae turnos (mes aun sin programar en SERPI). "
+              "No se toca la base.")
+        return 0
 
     sin_fecha = sum(1 for r in records if not (r['anio'] and r['mes']))
     if sin_fecha:
