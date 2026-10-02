@@ -9,6 +9,7 @@
       logs-api          Ultimas lineas de la API
       pipeline          Lanza una corrida del pipeline ahora (descarga SERPI + ETL + motor).
                         Sin fechas: mes actual + siguiente. Con -Desde/-Hasta: ese rango
+      migrar            Aplica una migracion de esquema (migracion_NNN_*.sql) ya publicada
       usuarios          Lista las cuentas del dashboard
       crear-usuario     Crea una cuenta con clave temporal (se muestra una vez)
       restablecer-clave Da una clave temporal nueva a una cuenta
@@ -22,10 +23,12 @@
     .\despliegue\servidor.ps1 pipeline
 .EXAMPLE
     .\despliegue\servidor.ps1 pipeline -Desde 2026-08-01 -Hasta 2026-10-31
+.EXAMPLE
+    .\despliegue\servidor.ps1 migrar -Archivo migracion_005_historial.sql
 #>
 param(
     [Parameter(Mandatory, Position = 0)]
-    [ValidateSet('estado', 'logs', 'logs-api', 'pipeline', 'usuarios',
+    [ValidateSet('estado', 'logs', 'logs-api', 'pipeline', 'migrar', 'usuarios',
                  'crear-usuario', 'restablecer-clave', 'desactivar')]
     [string] $Accion,
     [string] $Usuario,
@@ -34,6 +37,7 @@ param(
     [string] $Correo,
     [ValidatePattern('^\d{4}-\d{2}-\d{2}$')] [string] $Desde,
     [ValidatePattern('^\d{4}-\d{2}-\d{2}$')] [string] $Hasta,
+    [ValidatePattern('^migracion_\d{3}_[a-z0-9_]+\.sql$')] [string] $Archivo,
     [int] $Lineas = 80
 )
 
@@ -94,6 +98,16 @@ systemd-run --unit=turnos-pipeline-manual-`$(date +%Y%m%d%H%M%S) --uid=turnos --
 "@
         }
         Write-Host 'Corrida lanzada. Sigue el avance con:  .\despliegue\servidor.ps1 logs'
+    }
+    'migrar' {
+        Assert-Param $Archivo 'Archivo'
+        # Se ejecuta DENTRO del contenedor de la API: usa su .env y la copia del
+        # .sql que viene en la imagen, o sea la de la version publicada. Por eso
+        # primero se publica (desplegar.ps1) y despues se migra. Las migraciones
+        # tienen que ser idempotentes (IF NOT EXISTS): repetir una no rompe nada.
+        Invoke-ComposeEnServidor -TimeoutMin 10 @"
+-c "import os,psycopg2; c=psycopg2.connect(host=os.environ['DB_HOST'],port=os.environ.get('DB_PORT','5432'),dbname=os.environ['DB_NAME'],user=os.environ['DB_USER'],password=os.environ['DB_PASSWORD'],sslmode=os.environ.get('DB_SSLMODE','require')); cur=c.cursor(); cur.execute(open('$Archivo',encoding='utf-8').read()); c.commit(); print('Migracion aplicada: $Archivo')"
+"@
     }
     'usuarios' {
         Invoke-ComposeEnServidor 'gestionar_usuarios.py listar'

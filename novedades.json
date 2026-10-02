@@ -1,0 +1,38 @@
+[
+  {
+    "fecha": "2026-10-02",
+    "tipo": "MEJORA",
+    "titulo": "Historial de actualizaciones",
+    "detalle": "Nueva pestaña Historial, visible para todos los roles. Cada actualización diaria queda registrada con su resultado, los turnos que se agregaron, modificaron o borraron en SERPI (con el antes y el después) y las anomalías que se corrigieron o aparecieron por esos cambios."
+  },
+  {
+    "fecha": "2026-10-02",
+    "tipo": "CORRECCION",
+    "titulo": "Anomalías falsas por puestos renombrados en SERPI",
+    "detalle": "Cuando SERPI cambiaba el nombre de un puesto, los turnos con el nombre anterior no se borraban y el guarda quedaba en dos puestos a la vez. Eso generaba cruces de horario y jornadas de más de 12 h que no existían: las 97 críticas de agosto y 66 de las 72 de septiembre eran falsas. Ahora cada actualización reemplaza el mes completo, y si quedara algún turno viejo la carga se cancela sin tocar la base."
+  },
+  {
+    "fecha": "2026-10-02",
+    "tipo": "MEJORA",
+    "titulo": "Se conserva el reporte original de SERPI",
+    "detalle": "Cada descarga guarda el archivo .xls exactamente como lo entrega SERPI, con su formato, además de la copia que usa el sistema para procesarlo."
+  },
+  {
+    "fecha": "2026-10-02",
+    "tipo": "CORRECCION",
+    "titulo": "Un mes sin programar ya no detiene la actualización",
+    "detalle": "La actualización revisa también el mes siguiente, que SERPI carga entre el 25 y el 27. Antes de eso el reporte llega vacío y la actualización fallaba sin calcular anomalías. Ahora el mes vacío se omite y el resto se procesa."
+  },
+  {
+    "fecha": "2026-10-01",
+    "tipo": "CORRECCION",
+    "titulo": "La actualización diaria vuelve a funcionar",
+    "detalle": "Desde la instalación (27 de septiembre) la actualización automática de las 04:30 fallaba todas las noches por un problema de permisos en el servidor. Además, SERPI no entrega más de un mes por reporte: ahora se descarga y procesa mes por mes."
+  },
+  {
+    "fecha": "2026-10-01",
+    "tipo": "MEJORA",
+    "titulo": "Publicación de versiones y operación del servidor",
+    "detalle": "Las actualizaciones del sistema se publican y el servidor se opera desde el equipo principal, con registro de qué versión está instalada."
+  }
+]

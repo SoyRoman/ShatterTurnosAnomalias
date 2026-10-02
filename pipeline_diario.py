@@ -48,6 +48,7 @@ por un archivo truncado y necesita que alguien mire el archivo".
 """
 import argparse
 import calendar
+import json
 import datetime as dt
 import logging
 import logging.handlers
@@ -75,6 +76,11 @@ CANDADO = os.path.join(DIR_LOGS, "pipeline_diario.lock")
 # así cuando se niega a borrar. Es el único marcador que permite distinguir
 # "abortó por seguridad" de "se rompió": ambos salen con returncode 1.
 MARCA_ABORTO_UMBRAL = "ABORTADO:"
+
+# El ETL y el motor terminan con una línea «RESUMEN_JSON {...}» que este
+# script guarda en el historial de corridas (ver Historial). No va a la
+# bitácora: es larga y no es para leerla.
+MARCA_RESUMEN = "RESUMEN_JSON "
 
 # Un candado más viejo que esto se considera huérfano (la máquina se reinició a
 # mitad de corrida). Holgado a propósito: una descarga de dos meses contra SERPI
@@ -193,7 +199,7 @@ def ejecutar(etiqueta, argumentos, timeout_s):
         for linea in proceso.stdout:
             linea = linea.rstrip()
             lineas.append(linea)
-            if linea:
+            if linea and not linea.startswith(MARCA_RESUMEN):
                 log.info("  | %s", linea)
         proceso.wait(timeout=timeout_s)
         rc = proceso.returncode
@@ -316,77 +322,166 @@ def main():
     if not tomar_candado():
         return 6
 
+    historial = None if args.solo_descarga else Historial(desde, hasta)
+    rc = 1
     try:
-        # ---- 1/3 descarga y 2/3 ETL, un mes a la vez ----------------------
-        # (ver meses_del_rango: SERPI no entrega más de un mes por reporte).
-        # Un --archivo se carga tal cual: ya es un reporte de SERPI, de un mes.
-        if args.archivo:
-            ruta = os.path.abspath(args.archivo)
-            if not os.path.exists(ruta):
-                log.error("No existe el archivo indicado: %s", ruta)
-                return 1
-            log.info("1/3 DESCARGA omitida: se usa %s", ruta)
-            tramos = [(desde, hasta, ruta)]
-        else:
-            os.makedirs(DIR_REPORTES, exist_ok=True)
-            tramos = [(d, h, ruta_de_hoy(d, h)) for d, h in meses_del_rango(desde, hasta)]
+        rc = correr_pasos(args, desde, hasta, historial)
+        return rc
+    finally:
+        if historial:
+            historial.cerrar(rc)
+        soltar_candado()
 
-        for tramo_desde, tramo_hasta, ruta_malla in tramos:
-            if not args.archivo:
-                if not paso_descarga(tramo_desde, tramo_hasta, ruta_malla, args.timeout_min,
-                                     args.reintentos, args.espera_reintento):
-                    return 2
-                log.info("Malla del día guardada en %s (%.0f KB)",
-                         ruta_malla, os.path.getsize(ruta_malla) / 1024)
 
-            if args.solo_descarga:
+# Lo que ve quien abre la pestana Historial del dashboard, por codigo de salida.
+MENSAJES = {
+    0: "Actualización completa",
+    1: "Falta configuración o un archivo",
+    2: "No se pudo descargar la malla de SERPI",
+    3: "Falló la carga de la malla (ETL)",
+    4: "Carga detenida por seguridad: la malla nueva borraría demasiados turnos. Requiere revisión",
+    5: "Los turnos se actualizaron, pero falló el cálculo de anomalías",
+}
+
+
+class Historial:
+    """Registra la corrida en la tabla `corridas` (pestaña Historial).
+
+    Nunca hace fallar la corrida: si la BD no acepta el registro (p.ej. falta
+    migracion_005_historial.sql), se avisa en la bitácora y se sigue. Perder el
+    historial de un día es mucho menos grave que perder la auditoría del día.
+    """
+
+    def __init__(self, desde, hasta):
+        self.id = None
+        self.meses = {}
+        self.anomalias = None
+        try:
+            version = open(os.path.join(RAIZ, "VERSION"), encoding="utf-8").read().strip()
+        except OSError:
+            version = None
+        try:
+            with self._conectar() as conn, conn.cursor() as cur:
+                cur.execute("INSERT INTO corridas (desde, hasta, version) VALUES (%s, %s, %s) "
+                            "RETURNING id", (desde, hasta, version))
+                self.id = cur.fetchone()[0]
+        except Exception as e:
+            log.warning("No se pudo abrir el registro del historial: %s", e)
+
+    @staticmethod
+    def _conectar():
+        import psycopg2
+        return psycopg2.connect(
+            host=os.environ["DB_HOST"], port=os.environ.get("DB_PORT", "5432"),
+            dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"], sslmode=os.environ.get("DB_SSLMODE", "prefer"))
+
+    def absorber(self, salida):
+        """Toma las líneas RESUMEN_JSON que imprimen el ETL y el motor."""
+        for linea in salida.splitlines():
+            if not linea.startswith(MARCA_RESUMEN):
                 continue
+            try:
+                datos = json.loads(linea[len(MARCA_RESUMEN):])
+            except ValueError:
+                continue
+            if datos.pop("etapa", None) == "etl":
+                self.meses.update(datos.get("cambios", {}))
+            else:
+                self.anomalias = datos
 
-            # Lo que baja este pipeline es SIEMPRE el reporte completo (todos los
-            # clientes, el mes entero): la reconciliación cubre todos los
-            # puestos, para que un puesto renombrado en SERPI no deje turnos
-            # huérfanos (ver etl_normalizacion.reconciliar). Un --archivo puede
-            # ser un export filtrado, así que ahí se mantiene el alcance por puesto.
-            completa = [] if args.archivo else ["--malla-completa"]
-            rc, salida = ejecutar(f"2/3 ETL {tramo_desde} → {tramo_hasta} "
-                                  "(normalización + reconciliación)", [
-                sys.executable, "etl_normalizacion.py",
-                "--archivo", ruta_malla,
-                "--umbral-borrado", str(args.umbral_borrado),
-                *completa,
-            ], timeout_s=60 * 60)
-            if rc != 0:
-                if MARCA_ABORTO_UMBRAL in salida:
-                    log.error("EL ETL SE ABORTÓ POR SEGURIDAD, la BD quedó intacta. "
-                              "Esto NO es un fallo del programa: la malla descargada "
-                              "difiere tanto de la BD que borrar sería sospechoso. "
-                              "Revisa el archivo archivado antes de forzar nada.")
-                    return 4
-                log.error("El ETL falló. La BD puede haber quedado sin los cambios de hoy.")
-                return 3
+    def cerrar(self, rc):
+        if self.id is None:
+            return
+        estado = "OK" if rc == 0 else "REVISAR" if rc == 4 else "FALLO"
+        try:
+            with self._conectar() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE corridas SET fin = now(), estado = %s, codigo_salida = %s,
+                              mensaje = %s, meses = %s::jsonb, anomalias = %s::jsonb
+                       WHERE id = %s""",
+                    (estado, rc, MENSAJES.get(rc, f"Terminó con código {rc}"),
+                     json.dumps(self.meses, ensure_ascii=False),
+                     json.dumps(self.anomalias, ensure_ascii=False) if self.anomalias else None,
+                     self.id))
+            log.info("Historial: corrida #%d registrada como %s.", self.id, estado)
+        except Exception as e:
+            log.warning("No se pudo cerrar el registro del historial: %s", e)
+
+
+def correr_pasos(args, desde, hasta, historial):
+    # ---- 1/3 descarga y 2/3 ETL, un mes a la vez ----------------------
+    # (ver meses_del_rango: SERPI no entrega más de un mes por reporte).
+    # Un --archivo se carga tal cual: ya es un reporte de SERPI, de un mes.
+    if args.archivo:
+        ruta = os.path.abspath(args.archivo)
+        if not os.path.exists(ruta):
+            log.error("No existe el archivo indicado: %s", ruta)
+            return 1
+        log.info("1/3 DESCARGA omitida: se usa %s", ruta)
+        tramos = [(desde, hasta, ruta)]
+    else:
+        os.makedirs(DIR_REPORTES, exist_ok=True)
+        tramos = [(d, h, ruta_de_hoy(d, h)) for d, h in meses_del_rango(desde, hasta)]
+
+    for tramo_desde, tramo_hasta, ruta_malla in tramos:
+        if not args.archivo:
+            if not paso_descarga(tramo_desde, tramo_hasta, ruta_malla, args.timeout_min,
+                                 args.reintentos, args.espera_reintento):
+                return 2
+            log.info("Malla del día guardada en %s (%.0f KB)",
+                     ruta_malla, os.path.getsize(ruta_malla) / 1024)
 
         if args.solo_descarga:
-            log.info("--solo-descarga: la BD no se tocó. Fin.")
-            return 0
+            continue
 
-        # ---- 3/3 motor ----------------------------------------------------
-        # Se acota al mismo rango que se cargó: `_acotar` aplica ese filtro a
-        # borrar_abiertas/marcar_resueltas/reabrir_reincidentes, así que sin él
-        # la corrida marcaría estados sobre meses que hoy no se evaluaron.
-        rc, _ = ejecutar("3/3 MOTOR DE REGLAS", [
-            sys.executable, "motor_reglas.py", "--desde", desde, "--hasta", hasta,
+        # Lo que baja este pipeline es SIEMPRE el reporte completo (todos los
+        # clientes, el mes entero): la reconciliación cubre todos los
+        # puestos, para que un puesto renombrado en SERPI no deje turnos
+        # huérfanos (ver etl_normalizacion.reconciliar). Un --archivo puede
+        # ser un export filtrado, así que ahí se mantiene el alcance por puesto.
+        completa = [] if args.archivo else ["--malla-completa"]
+        rc, salida = ejecutar(f"2/3 ETL {tramo_desde} → {tramo_hasta} "
+                              "(normalización + reconciliación)", [
+            sys.executable, "etl_normalizacion.py",
+            "--archivo", ruta_malla,
+            "--umbral-borrado", str(args.umbral_borrado),
+            *completa,
         ], timeout_s=60 * 60)
+        if historial:
+            historial.absorber(salida)
         if rc != 0:
-            log.error("El motor falló. Los turnos SÍ se actualizaron, pero las "
-                      "anomalías quedaron con la foto de ayer. Se puede reintentar "
-                      "solo el motor: python motor_reglas.py --desde %s --hasta %s",
-                      desde, hasta)
-            return 5
+            if MARCA_ABORTO_UMBRAL in salida:
+                log.error("EL ETL SE ABORTÓ POR SEGURIDAD, la BD quedó intacta. "
+                          "Esto NO es un fallo del programa: la malla descargada "
+                          "difiere tanto de la BD que borrar sería sospechoso. "
+                          "Revisa el archivo archivado antes de forzar nada.")
+                return 4
+            log.error("El ETL falló. La BD puede haber quedado sin los cambios de hoy.")
+            return 3
 
-        log.info("CORRIDA COMPLETA sin errores.")
+    if args.solo_descarga:
+        log.info("--solo-descarga: la BD no se tocó. Fin.")
         return 0
-    finally:
-        soltar_candado()
+
+    # ---- 3/3 motor ----------------------------------------------------
+    # Se acota al mismo rango que se cargó: `_acotar` aplica ese filtro a
+    # borrar_abiertas/marcar_resueltas/reabrir_reincidentes, así que sin él
+    # la corrida marcaría estados sobre meses que hoy no se evaluaron.
+    rc, salida = ejecutar("3/3 MOTOR DE REGLAS", [
+        sys.executable, "motor_reglas.py", "--desde", desde, "--hasta", hasta,
+    ], timeout_s=60 * 60)
+    if historial:
+        historial.absorber(salida)
+    if rc != 0:
+        log.error("El motor falló. Los turnos SÍ se actualizaron, pero las "
+                  "anomalías quedaron con la foto de ayer. Se puede reintentar "
+                  "solo el motor: python motor_reglas.py --desde %s --hasta %s",
+                  desde, hasta)
+        return 5
+
+    log.info("CORRIDA COMPLETA sin errores.")
+    return 0
 
 
 if __name__ == "__main__":

@@ -12,9 +12,11 @@ archivo sin duplicar turnos (usa upsert sobre una llave natural).
 import argparse
 import calendar
 import datetime as dt
+import json
 import os
 import re
 import sys
+from collections import defaultdict
 from datetime import datetime
 
 import openpyxl
@@ -269,6 +271,35 @@ def get_connection():
     )
 
 
+# Historial de cambios de la malla (tabla `corridas`, pestana Historial).
+# Los CONTADORES son exactos; la lista de cambios se corta en este limite por
+# mes y tipo, para que una carga inicial de 8.000 turnos no se guarde entera
+# como "8.000 turnos nuevos".
+LIMITE_DETALLE = 300
+
+
+def nuevo_resumen_mes():
+    return {'turnos': 0, 'nuevos': 0, 'modificados': 0, 'borrados': 0,
+            'primera_carga': False, 'detalle': []}
+
+
+def describir_turno(codigo, inicio, fin):
+    """'E 06:00-18:00'. Igual para lo que viene del Excel (texto) y de la BD (time)."""
+    hora = lambda h: h.strftime('%H:%M') if hasattr(h, 'strftime') else (h or '')
+    rango = f"{hora(inicio)}-{hora(fin)}" if (inicio or fin) else ''
+    return f"{codigo or ''} {rango}".strip()
+
+
+def anotar(mes, tipo, cedula, guarda, puesto, fecha, antes, despues):
+    if mes['primera_carga'] and tipo == 'NUEVO':
+        return  # en una carga inicial todo es "nuevo": listarlo no informa nada
+    if sum(1 for d in mes['detalle'] if d['tipo'] == tipo) >= LIMITE_DETALLE:
+        return
+    mes['detalle'].append({'tipo': tipo, 'cedula': cedula, 'guarda': guarda,
+                           'puesto': puesto, 'fecha': str(fecha),
+                           'antes': antes, 'despues': despues})
+
+
 def reconciliar(cur, claves_turnos, claves_horas, puestos, fecha_min, fecha_max,
                 periodos, umbral_pct, completa=False):
     """Borra lo que ya NO viene en el archivo, dentro del alcance que el archivo
@@ -303,7 +334,7 @@ def reconciliar(cur, claves_turnos, claves_horas, puestos, fecha_min, fecha_max,
     catastrofico y silencioso. Por encima de ese porcentaje se aborta sin tocar
     nada."""
     if not claves_turnos:
-        return {'turnos_borrados': 0, 'horas_borradas': 0}
+        return {'turnos_borrados': 0, 'horas_borradas': 0, '_borrados': []}
 
     lista_puestos = sorted(puestos)
 
@@ -350,8 +381,25 @@ def reconciliar(cur, claves_turnos, claves_horas, puestos, fecha_min, fecha_max,
             "  Revisa el archivo. Si el cambio es real, repite con "
             "--umbral-borrado <pct> o --sin-reconciliar.")
 
-    cur.execute(f"DELETE {sobrantes}", params)
-    turnos_borrados = cur.rowcount
+    cur.execute(f"""DELETE {sobrantes}
+                    RETURNING t.guarda_cedula, t.puesto_id, t.fecha,
+                              t.tipo_turno_codigo, t.hora_inicio, t.hora_fin""", params)
+    borrados = cur.fetchall()
+    turnos_borrados = len(borrados)
+
+    # Garantia contra duplicados: con la malla completa, despues de reconciliar
+    # TODO turno del alcance tiene que venir de este archivo (el upsert le pone
+    # fecha_carga = now(), que es la hora de esta transaccion). Uno con otra
+    # fecha_carga es un huerfano que sobrevivio — exactamente lo que fabrico las
+    # criticas falsas del 2026-10-02. Si aparece, no se confirma nada.
+    if completa:
+        cur.execute(f"SELECT count(*) FROM turnos t WHERE {alcance} "
+                    "AND t.fecha_carga <> now()", params)
+        huerfanos = cur.fetchone()[0]
+        if huerfanos:
+            raise SystemExit(
+                f"ERROR DE INTEGRIDAD: quedan {huerfanos} turnos del periodo que no "
+                "vienen en el archivo. No se confirmo ningun cambio.")
 
     # Mismo criterio para las horas declaradas: si la asignacion guarda-puesto
     # desaparecio del archivo, su fila de horas tambien sobra.
@@ -377,7 +425,8 @@ def reconciliar(cur, claves_turnos, claves_horas, puestos, fecha_min, fecha_max,
                     (tuple(sorted(periodos)), completa, lista_puestos))
         horas_borradas = cur.rowcount
 
-    return {'turnos_borrados': turnos_borrados, 'horas_borradas': horas_borradas}
+    return {'turnos_borrados': turnos_borrados, 'horas_borradas': horas_borradas,
+            '_borrados': borrados}
 
 
 def load(records, conn, reconciliacion=True, umbral_pct=20.0, completa=False):
@@ -397,6 +446,15 @@ def load(records, conn, reconciliacion=True, umbral_pct=20.0, completa=False):
     puestos_archivo = set()
     periodos_archivo = set()
     fecha_min = fecha_max = None
+
+    # Resumen de cambios por mes ('YYYY-MM') para el historial. Un mes que no
+    # tenia ningun turno es una carga inicial: ahi no se listan los "nuevos".
+    cambios = defaultdict(nuevo_resumen_mes)
+    for anio, mes in {(r['anio'], r['mes']) for r in records if r['anio'] and r['mes']}:
+        primero = dt.date(anio, mes, 1)
+        cur.execute("SELECT NOT EXISTS (SELECT 1 FROM turnos WHERE fecha >= %s AND fecha < %s)",
+                    (primero, primero + dt.timedelta(days=calendar.monthrange(anio, mes)[1])))
+        cambios[f"{anio:04d}-{mes:02d}"]['primera_carga'] = cur.fetchone()[0]
 
     for rec in records:
         cliente = rec['cliente'] or '(sin cliente)'
@@ -447,6 +505,8 @@ def load(records, conn, reconciliacion=True, umbral_pct=20.0, completa=False):
                 continue
             fecha = f"{rec['anio']:04d}-{rec['mes']:02d}-{t['dia']:02d}"
 
+            # RETURNING old.* (PostgreSQL 18) dice si la fila es nueva y como
+            # era antes: de ahi sale el historial de cambios de la malla.
             cur.execute(
                 """INSERT INTO turnos
                        (guarda_cedula, puesto_id, fecha, slot, tipo_turno_codigo,
@@ -457,11 +517,28 @@ def load(records, conn, reconciliacion=True, umbral_pct=20.0, completa=False):
                                  hora_inicio = EXCLUDED.hora_inicio,
                                  hora_fin = EXCLUDED.hora_fin,
                                  horas_calculadas = EXCLUDED.horas_calculadas,
-                                 fecha_carga = now()""",
+                                 fecha_carga = now()
+                   RETURNING old.id IS NULL,
+                             old.tipo_turno_codigo, old.hora_inicio, old.hora_fin""",
                 (cedula, this_puesto_id, fecha, rec['slot'], t['codigo'],
                  t['inicio'], t['fin'], t['horas']),
             )
+            es_nuevo, ant_codigo, ant_ini, ant_fin = cur.fetchone()
             n_turnos += 1
+
+            mes = cambios[fecha[:7]]
+            mes['turnos'] += 1
+            ahora = describir_turno(t['codigo'], t['inicio'], t['fin'])
+            if es_nuevo:
+                mes['nuevos'] += 1
+                anotar(mes, 'NUEVO', cedula, rec['guarda_nombre'], rec['puesto'],
+                       fecha, None, ahora)
+            else:
+                antes = describir_turno(ant_codigo, ant_ini, ant_fin)
+                if antes != ahora:
+                    mes['modificados'] += 1
+                    anotar(mes, 'MODIFICADO', cedula, rec['guarda_nombre'],
+                           rec['puesto'], fecha, antes, ahora)
 
             claves_turnos.add((cedula, this_puesto_id, fecha, rec['slot']))
             puestos_archivo.add(this_puesto_id)
@@ -505,7 +582,24 @@ def load(records, conn, reconciliacion=True, umbral_pct=20.0, completa=False):
                                  fecha_min, fecha_max, periodos_archivo, umbral_pct,
                                  completa=completa))
     else:
-        stats.update({'turnos_borrados': 0, 'horas_borradas': 0})
+        stats.update({'turnos_borrados': 0, 'horas_borradas': 0, '_borrados': []})
+
+    borrados = stats.pop('_borrados')
+    if borrados:
+        # Los turnos borrados ya no estan en el archivo: los nombres de guarda y
+        # puesto se buscan en la BD (que todavia los tiene, aunque el turno no).
+        cur.execute("SELECT id, nombre FROM puestos WHERE id = ANY(%s)",
+                    (sorted({b[1] for b in borrados}),))
+        nombre_puesto = dict(cur.fetchall())
+        cur.execute("SELECT cedula, nombre FROM guardas WHERE cedula = ANY(%s)",
+                    (sorted({b[0] for b in borrados}),))
+        nombre_guarda = dict(cur.fetchall())
+        for cedula, pid, fecha, codigo, ini, fin in borrados:
+            mes = cambios[str(fecha)[:7]]
+            mes['borrados'] += 1
+            anotar(mes, 'BORRADO', cedula, nombre_guarda.get(cedula), nombre_puesto.get(pid),
+                   fecha, describir_turno(codigo, ini, fin), None)
+    stats['cambios'] = dict(sorted(cambios.items()))
 
     conn.commit()
     cur.close()
@@ -560,9 +654,18 @@ def main():
                  umbral_pct=args.umbral_borrado, completa=args.malla_completa)
     conn.close()
 
+    cambios = stats.pop('cambios')
     print("Listo:")
     for k, v in stats.items():
         print(f"  {k}: {v}")
+    for periodo, c in cambios.items():
+        print(f"  {periodo}: {c['turnos']} turnos | nuevos {c['nuevos']} | "
+              f"modificados {c['modificados']} | borrados {c['borrados']}"
+              + (" (carga inicial)" if c['primera_carga'] else ""))
+    # Una linea legible por maquina para pipeline_diario.py, que la guarda en
+    # el historial de corridas. Va al final y en una sola linea a proposito.
+    print("RESUMEN_JSON " + json.dumps({'etapa': 'etl', 'cambios': cambios},
+                                       ensure_ascii=False, default=str))
 
 
 if __name__ == '__main__':

@@ -20,6 +20,7 @@ Variables de entorno adicionales a las de .env:
                          persona: no sustituye el login.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -305,6 +306,12 @@ PERMISOS = {
     '/periodos':         _TODOS,   # el selector de mes lo usan las tres bandejas
     '/reglas':           _TODOS,   # catalogo normativo, sin PII
 
+    # Historial: que trajo cada actualizacion diaria y que mejoras tuvo el
+    # sistema. Lo ven todos los roles a proposito: es la forma de saber si una
+    # correccion hecha en SERPI ya llego, sin preguntarle a nadie.
+    '/historial':        _TODOS,
+    '/novedades':        _TODOS,
+
     # Bandeja del programador: hallazgos puntuales.
     '/anomalias':        _MANDO | {'PROGRAMADOR'},
 
@@ -341,6 +348,7 @@ PERMISOS_PREFIJO = (
     # cada una llega desde su propia bandeja, y quien puede ver un hallazgo
     # tiene que poder justificarlo.
     ('/anomalias/', _TODOS),
+    ('/historial/', _TODOS),
 )
 
 
@@ -352,6 +360,7 @@ PANELES = {
     'gerencia':    '/kpi',
     'programador': '/anomalias',
     'nomina':      '/nomina',
+    'historial':   '/historial',
     'admin':       '/usuarios',
 }
 
@@ -812,6 +821,39 @@ def reglas():
                   parametros, fundamento_legal, vigente_desde, vigente_hasta
            FROM reglas_anomalia ORDER BY naturaleza, codigo"""
     )
+
+
+@app.get("/historial", dependencies=[Depends(verificar_token)])
+def historial(limite: int = Query(60, ge=1, le=365)):
+    """Ultimas corridas del pipeline, sin el detalle (que puede ser largo).
+    Una por actualizacion: cuando fue, si salio bien y cuanto cambio."""
+    return consultar(
+        """SELECT id, inicio, fin, desde, hasta, estado, codigo_salida, mensaje, version,
+                  (SELECT coalesce(jsonb_object_agg(k, v - 'detalle'), '{}'::jsonb)
+                     FROM jsonb_each(meses) AS m(k, v)) AS meses,
+                  anomalias - 'lista_nuevas' - 'lista_corregidas' AS anomalias
+           FROM corridas ORDER BY inicio DESC LIMIT %s""", (limite,))
+
+
+@app.get("/historial/{corrida_id}", dependencies=[Depends(verificar_token)])
+def historial_corrida(corrida_id: int):
+    """Una corrida con todo su detalle: que turnos cambiaron en SERPI y que
+    anomalias se corrigieron o aparecieron por eso."""
+    fila = consultar("SELECT * FROM corridas WHERE id = %s", (corrida_id,), una=True)
+    if not fila:
+        raise HTTPException(status_code=404, detail="Corrida no encontrada")
+    return fila
+
+
+@app.get("/novedades", dependencies=[Depends(verificar_token)])
+def novedades():
+    """Mejoras y correcciones del sistema, de la mas reciente a la mas vieja.
+    Se mantienen a mano en novedades.json, junto con el cambio que describen."""
+    try:
+        with open(os.path.join(RAIZ, "novedades.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
 
 
 # ---------------------------------------------------------------------------

@@ -158,14 +158,31 @@ Funciona mientras la versión siga en GitHub. El paquete en S3 se borra a los
 **Un despliegue de código nunca cambia la base.** Si una versión trae un
 `migracion_NNN_*.sql` nuevo, se aplica aparte y a propósito:
 
-1. Probarla primero sobre la base local.
-2. Publicar la versión (así el archivo llega a `/opt/turnos`).
-3. Aplicarla con `psql` desde la EC2 por SSM, igual que el paso "schema" de
-   `bootstrap.sh` (la clave y el host salen de Parameter Store; `PGSSLMODE=require`).
+1. Probarla primero sobre la base local, **dos veces**: tiene que ser
+   idempotente (`IF NOT EXISTS`), para que repetirla no rompa nada.
+2. Publicar la versión (así el archivo entra en la imagen del servidor).
+3. Aplicarla:
+   ```powershell
+   .\despliegue\servidor.ps1 migrar -Archivo migracion_005_historial.sql
+   ```
 
-No hay todavía un comando que lo haga solo: hasta que exista una migración
-nueva no hay con qué probarlo, y un comando de migraciones sin probar es peor
-que ninguno.
+Corre dentro del contenedor de la API, con su `.env`, y usa la copia del
+`.sql` de la versión publicada. Por eso va **después** de `desplegar.ps1`.
+Agregar la migración nueva también a la lista de `bootstrap.sh`, para que una
+instalación desde cero la incluya.
+
+| Migración | Qué agrega | En producción |
+|---|---|---|
+| `migracion_004_usuarios.sql` | Cuentas, sesiones, bitácora de accesos | Aplicada por `bootstrap.sh` |
+| `migracion_005_historial.sql` | Tabla `corridas` (pestaña Historial) | **Aplicar al publicar la versión del 2026-10-02** |
+
+### Novedades del sistema
+
+La sección "Mejoras y correcciones" de la pestaña Historial sale de
+`novedades.json`, en la raíz del repo. **Al publicar un cambio que note quien
+usa el dashboard, agregar una entrada arriba de todo** (fecha, `MEJORA` o
+`CORRECCION`, título y detalle en lenguaje de usuario, no técnico) en el mismo
+commit. Es lo que le permite a cualquier rol saber qué cambió y por qué.
 
 ---
 
@@ -193,9 +210,31 @@ Aparece en `servidor.ps1 logs` y `estado` (`status=N`):
 | 5 | El motor de reglas falló | Los turnos sí se cargaron; revisar el log |
 | 6 | Ya había otra corrida | Nada |
 
-> **Nadie recibe aviso si una corrida falla.** Hoy el fallo solo queda en el
-> journal. Revisar `servidor.ps1 estado` al menos una vez por semana hasta que
-> exista la alarma (pendiente, §8).
+> **Nadie recibe aviso si una corrida falla.** Desde el 2026-10-02 cada corrida
+> queda en la pestaña **Historial** del dashboard, con su resultado — es lo
+> primero que hay que mirar. Pero no llega ninguna alerta: si nadie abre el
+> Historial, un fallo pasa desapercibido hasta que exista la alarma (§8).
+
+### La actualización diaria y los duplicados
+
+Programación cambia la malla en SERPI todos los días, así que el sistema la
+vuelve a descargar **todos los días a las 04:30** (mes actual y siguiente) y
+la compara con la anterior. Lo que garantiza que no queden datos duplicados:
+
+1. **Cada mes se reemplaza entero.** Lo que ya no viene en el reporte de SERPI
+   se borra, aunque sea de un puesto que SERPI renombró o eliminó
+   (`--malla-completa`, lo pasa el pipeline siempre que descarga).
+2. **Verificación antes de confirmar.** Si después de cargar queda en el mes
+   algún turno que no vino en el archivo, la carga se cancela entera y la base
+   queda como estaba (`ERROR DE INTEGRIDAD`, código 3).
+3. **Freno contra archivos truncados.** Si la malla nueva borraría más del 20%
+   de los turnos, no se toca nada (código 4).
+4. **Un mismo turno no puede existir dos veces**: la base lo impide por
+   guarda + puesto + fecha + turno.
+
+Cada actualización queda en el Historial con los turnos nuevos, modificados
+(antes → después) y borrados, y las anomalías que se corrigieron o
+aparecieron por esos cambios.
 
 ### Cambiar el dominio
 
@@ -287,7 +326,6 @@ con `Target closed` o el kernel mata el proceso, subir la EC2 a `t3.medium`.
 | **Dominio propio** en lugar de `sslip.io` | La URL provisional depende de un servicio externo y de que la IP no cambie |
 | **Decisión de legal** sobre transferencia internacional (Ley 1581): DPA de AWS, inscripción en el RNBD | Los datos son PII de ~400 trabajadores alojados fuera de Colombia |
 | **Usuario de solo lectura en `bitacorapp`** para el cruce de asistencia | No se toca la base de la empresa hasta tenerlo |
-| Comando `servidor.ps1 migrar` | Ver §4, "Migraciones" |
 
 ### Lo que este despliegue NO hace
 

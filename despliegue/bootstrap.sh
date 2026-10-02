@@ -131,7 +131,7 @@ export PGSSLMODE=require
 export PGSSLCERT=
 export PGSSLKEY=
 cd "$APP_DIR"
-for f in schema.sql migracion_004_usuarios.sql seed_reglas.sql vistas_reporte.sql; do
+for f in schema.sql migracion_004_usuarios.sql migracion_005_historial.sql seed_reglas.sql vistas_reporte.sql; do
   psql -h "$PGHOST" -U turnos_app -d turnos -v ON_ERROR_STOP=1 -f "$f"
 done
 unset PGPASSWORD

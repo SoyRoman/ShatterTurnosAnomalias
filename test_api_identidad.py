@@ -281,6 +281,9 @@ def probar_autorizacion(cur):
         '/docs':              {'ADMIN'},
         '/periodos':          {'ADMIN', 'GERENCIA', 'PROGRAMADOR', 'NOMINA'},
         '/reglas':            {'ADMIN', 'GERENCIA', 'PROGRAMADOR', 'NOMINA'},
+        # El historial de actualizaciones lo ven todos los roles a proposito.
+        '/historial':         {'ADMIN', 'GERENCIA', 'PROGRAMADOR', 'NOMINA'},
+        '/novedades':         {'ADMIN', 'GERENCIA', 'PROGRAMADOR', 'NOMINA'},
     }
 
     cookies = {}
@@ -311,11 +314,11 @@ def probar_autorizacion(cur):
 
     # Los paneles que ve cada rol salen de la misma tabla.
     _, ident, _ = peticion('/identidad', cookie=cookies['PROGRAMADOR'])
-    comprobar("un PROGRAMADOR solo ve su bandeja", ident['paneles'], ['programador'])
+    comprobar("un PROGRAMADOR solo ve su bandeja (+ historial)", ident['paneles'], ['programador', 'historial'])
     _, ident, _ = peticion('/identidad', cookie=cookies['NOMINA'])
-    comprobar("un NOMINA solo ve la suya", ident['paneles'], ['nomina'])
+    comprobar("un NOMINA solo ve la suya (+ historial)", ident['paneles'], ['nomina', 'historial'])
     _, ident, _ = peticion('/identidad', cookie=cookies['ADMIN'])
-    comprobar("un ADMIN las ve todas", len(ident['paneles']), 4)
+    comprobar("un ADMIN las ve todas", len(ident['paneles']), 5)
 
     return cookies
 

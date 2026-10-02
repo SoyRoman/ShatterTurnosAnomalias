@@ -22,6 +22,7 @@ antes de guardarla -- y no solo en esta auditoria retrospectiva.
 
 import argparse
 import hashlib
+import json
 import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -618,6 +619,60 @@ def marcar_resueltas(cur, regla_ids, huellas_vigentes, cedula=None, desde=None, 
     return previas
 
 
+# La lista de anomalias nuevas/corregidas que se guarda en el historial se corta
+# aqui (los contadores son exactos). Igual que en el ETL.
+LIMITE_DETALLE = 300
+
+
+def foto_vigentes(cur, regla_ids, cedula=None, desde=None, hasta=None):
+    """Anomalias vigentes (todo menos RESUELTA) en el alcance de esta corrida,
+    por huella. Es el "antes" del historial."""
+    if not regla_ids:
+        return {}
+    filtros = ["a.estado <> 'RESUELTA'", "a.regla_id = ANY(%s)"]
+    params = [regla_ids]
+    _acotar(filtros, params, cedula, desde, hasta)
+    filtros = [f if f.startswith('a.') else 'a.' + f for f in filtros]
+    cur.execute(f"""SELECT a.huella, r.codigo, a.guarda_cedula, a.fecha_referencia,
+                           a.severidad, a.detalle
+                    FROM anomalias a JOIN reglas_anomalia r ON r.id = a.regla_id
+                    WHERE {' AND '.join(filtros)}""", params)
+    return {h: {'regla': c, 'cedula': ced, 'fecha': str(f), 'severidad': s, 'detalle': d}
+            for h, c, ced, f, s, d in cur.fetchall()}
+
+
+def resumen_historial(cur, antes, despues):
+    """Que cambio en las anomalias frente a la corrida anterior.
+
+    - corregidas: estaban y ya no aparecen -> la malla se arreglo en SERPI
+    - nuevas: aparecen y no estaban -> la malla se rompio (o se cargo un mes nuevo)
+    """
+    corregidas = [antes[h] for h in antes.keys() - despues.keys()]
+    nuevas = [despues[h] for h in despues.keys() - antes.keys()]
+    cedulas = sorted({x['cedula'] for x in corregidas + nuevas if x['cedula']})
+    nombres = {}
+    if cedulas:
+        cur.execute("SELECT cedula, nombre FROM guardas WHERE cedula = ANY(%s)", (cedulas,))
+        nombres = dict(cur.fetchall())
+
+    def lista(xs):
+        orden = {'CRITICA': 0, 'ALTA': 1, 'BAJA': 2}
+        xs = sorted(xs, key=lambda x: (orden.get(x['severidad'], 9), x['fecha'], x['regla']))
+        return [{**x, 'guarda': nombres.get(x['cedula'])} for x in xs[:LIMITE_DETALLE]]
+
+    por_regla = defaultdict(lambda: {'nuevas': 0, 'corregidas': 0})
+    for x in nuevas:
+        por_regla[x['regla']]['nuevas'] += 1
+    for x in corregidas:
+        por_regla[x['regla']]['corregidas'] += 1
+    return {
+        'vigentes_antes': len(antes), 'vigentes': len(despues),
+        'nuevas': len(nuevas), 'corregidas': len(corregidas),
+        'por_regla': dict(sorted(por_regla.items())),
+        'lista_nuevas': lista(nuevas), 'lista_corregidas': lista(corregidas),
+    }
+
+
 def _fecha(texto):
     return datetime.strptime(texto, '%Y-%m-%d').date()
 
@@ -655,12 +710,18 @@ def main():
         rango = f" (rango {args.desde or '...'} a {args.hasta or '...'})"
     print(f"Evaluando {len(cedulas)} guarda(s){rango} ...")
 
+    # Foto de lo vigente ANTES de recalcular, para el historial: lo que estaba y
+    # ya no aparece se corrigio en SERPI; lo que aparece y no estaba es nuevo.
+    # Hay que tomarla antes de borrar_abiertas, que regenera las ABIERTA.
+    antes = foto_vigentes(cur, todos_los_regla_ids, args.cedula, args.desde, args.hasta)
+
     if not args.dry_run:
         borrar_abiertas(cur, todos_los_regla_ids, args.cedula, args.desde, args.hasta)
 
     conteo = defaultdict(int)
     guardas_afectados = set()
     huellas_vigentes = set()
+    info_vigentes = {}
     nuevas = preservadas = 0
 
     def registrar(codigo, cedula, violacion):
@@ -679,6 +740,9 @@ def main():
         else:
             huella, es_nueva = insertar_anomalia(cur, regla, codigo, cedula, violacion)
             huellas_vigentes.add(huella)
+            info_vigentes[huella] = {'regla': codigo, 'cedula': cedula,
+                                     'fecha': str(fecha_ref), 'severidad': regla['severidad'],
+                                     'detalle': violacion['detalle']}
             if es_nueva:
                 nuevas += 1
             else:
@@ -729,6 +793,7 @@ def main():
             cur, todos_los_regla_ids, huellas_vigentes,
             args.cedula, args.desde, args.hasta,
         )
+        resumen = resumen_historial(cur, antes, info_vigentes)
         conn.commit()
     conn.close()
 
@@ -749,6 +814,11 @@ def main():
         if reabiertas:
             print(f"  REABIERTAS: {len(reabiertas)} anomalias dadas por resueltas "
                   f"volvieron a aparecer -> revisar reincidencia")
+        print(f"  frente a la corrida anterior: {resumen['nuevas']} nuevas, "
+              f"{resumen['corregidas']} corregidas, {resumen['vigentes']} vigentes")
+        # Para pipeline_diario.py (historial de corridas). Una sola linea.
+        print("RESUMEN_JSON " + json.dumps({'etapa': 'motor', **resumen},
+                                           ensure_ascii=False, default=str))
 
 
 if __name__ == '__main__':

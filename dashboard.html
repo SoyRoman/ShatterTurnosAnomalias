@@ -65,6 +65,12 @@
   .eti.EN_REVISION{background:var(--alta-f);color:var(--alta)}
   .eti.JUSTIFICADA{background:var(--baja-f);color:var(--baja)}
   .eti.RESUELTA{background:var(--ok-f);color:var(--ok)}
+  .eti.OK,.eti.CORRECCION,.eti.CORREGIDA{background:var(--ok-f);color:var(--ok)}
+  .eti.FALLO,.eti.BORRADO{background:var(--critica-f);color:var(--critica)}
+  .eti.REVISAR,.eti.MODIFICADO{background:var(--alta-f);color:var(--alta)}
+  .eti.EN_CURSO,.eti.MEJORA,.eti.NUEVO{background:var(--baja-f);color:var(--baja)}
+  tr.clic{cursor:pointer}
+  tr.sel td{background:#eef4ff}
 
   .grupo td{background:#eef2f7;font-weight:650;font-size:13px}
   .grupo .cuantos{float:right;color:var(--tinta-suave);font-weight:600}
@@ -120,6 +126,7 @@
   <button class="activa" data-panel="gerencia" onclick="verPanel(this)">Gerencia</button>
   <button data-panel="programador" onclick="verPanel(this)">Programador<span class="cuenta" id="cuentaProg">0</span></button>
   <button data-panel="nomina" onclick="verPanel(this)">Nómina<span class="cuenta" id="cuentaNom">0</span></button>
+  <button data-panel="historial" onclick="verPanel(this)">Historial</button>
   <button data-panel="admin" id="navAdmin" hidden onclick="verPanel(this)">Cuentas</button>
 </nav>
 
@@ -211,6 +218,27 @@
     <p class="leyenda">«Programado» son las horas que suman los turnos cargados en la malla para ese
       guarda-puesto-mes. Puede diferir legítimamente de lo declarado (ausencias, novedades posteriores);
       el <strong>descuadre</strong> —que el total no cuadre con sus propias categorías— es el que siempre es un error.</p>
+  </section>
+
+  <!-- ================= HISTORIAL (todos los roles) ================= -->
+  <section id="historial" class="oculto">
+    <h2>Actualizaciones diarias</h2>
+    <p class="nota">El sistema descarga la malla de SERPI todos los días a las 04:30 y la compara con la
+      anterior. Aquí queda cada actualización: si salió bien, qué turnos cambiaron en SERPI y qué
+      anomalías se corrigieron o aparecieron por esos cambios. Haz clic en una fila para ver el detalle.</p>
+    <div class="panel"><table>
+      <thead><tr><th>Fecha</th><th>Resultado</th><th>Meses</th>
+        <th class="num">Turnos nuevos</th><th class="num">Modificados</th><th class="num">Borrados</th>
+        <th class="num">Anomalías corregidas</th><th class="num">Anomalías nuevas</th></tr></thead>
+      <tbody id="tablaHistorial"></tbody>
+    </table></div>
+    <div id="detalleCorrida"></div>
+
+    <h2>Mejoras y correcciones del sistema</h2>
+    <div class="panel"><table>
+      <thead><tr><th>Fecha</th><th>Tipo</th><th>Cambio</th></tr></thead>
+      <tbody id="tablaNovedades"></tbody>
+    </table></div>
   </section>
 
   <!-- ================= ADMINISTRACIÓN (solo ADMIN) ================= -->
@@ -421,6 +449,7 @@ function mostrarPanel(nombre){
   document.querySelectorAll('main section').forEach(s => s.classList.add('oculto'));
   document.getElementById(nombre).classList.remove('oculto');
   if (nombre === 'admin'){ cargarUsuarios(); cargarAccesos(); }
+  if (nombre === 'historial') cargarHistorial();
 }
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
@@ -766,6 +795,102 @@ async function cambiarRol(id, rol, usuario){
     await pedir('/usuarios/' + id, {method:'PATCH', body: JSON.stringify({rol})});
     cargarUsuarios();
   } catch(e){ alert(e.message); cargarUsuarios(); }
+}
+
+// ---------- Historial ----------
+const ESTADO_CORRIDA = {OK: 'Completa', FALLO: 'Falló', REVISAR: 'Revisar', EN_CURSO: 'En curso'};
+const TIPO_CAMBIO = {NUEVO: 'Nuevo', MODIFICADO: 'Modificado', BORRADO: 'Borrado'};
+const fechaHora = s => s ? new Date(s).toLocaleString('es-CO', {dateStyle: 'medium', timeStyle: 'short'}) : '—';
+const nombreRegla = r => String(r || '').replace(/_/g, ' ').toLowerCase();
+
+function totalesCorrida(c){
+  const t = {nuevos: 0, modificados: 0, borrados: 0, inicial: false};
+  Object.values(c.meses || {}).forEach(m => {
+    t.nuevos += m.nuevos || 0; t.modificados += m.modificados || 0; t.borrados += m.borrados || 0;
+    t.inicial = t.inicial || m.primera_carga;
+  });
+  return t;
+}
+
+async function cargarHistorial(){
+  const tb = document.getElementById('tablaHistorial');
+  const tn = document.getElementById('tablaNovedades');
+  tb.innerHTML = '<tr><td colspan="8" class="cargando">Cargando…</td></tr>';
+  try{
+    const [corridas, novedades] = await Promise.all([pedir('/historial'), pedir('/novedades')]);
+    tb.innerHTML = corridas.length ? corridas.map(c => {
+      const t = totalesCorrida(c), a = c.anomalias || {};
+      const meses = Object.keys(c.meses || {}).join(', ') || '—';
+      return `<tr class="clic" data-id="${c.id}" onclick="verCorrida(${c.id})">
+        <td>${esc(fechaHora(c.inicio))}</td>
+        <td><span class="eti ${esc(c.estado)}">${esc(ESTADO_CORRIDA[c.estado] || c.estado)}</span>
+          ${c.estado !== 'OK' && c.mensaje ? `<div class="detalle">${esc(c.mensaje)}</div>` : ''}</td>
+        <td>${esc(meses)}${t.inicial ? ' <span class="detalle">(carga inicial)</span>' : ''}</td>
+        <td class="num">${fmt(t.nuevos)}</td><td class="num">${fmt(t.modificados)}</td>
+        <td class="num">${fmt(t.borrados)}</td>
+        <td class="num">${a.corregidas != null ? fmt(a.corregidas) : '—'}</td>
+        <td class="num">${a.nuevas != null ? fmt(a.nuevas) : '—'}</td></tr>`;
+    }).join('') : '<tr><td colspan="8" class="vacio">Todavía no hay actualizaciones registradas.</td></tr>';
+
+    tn.innerHTML = novedades.length ? novedades.map(n => `<tr>
+        <td style="white-space:nowrap">${esc(n.fecha)}</td>
+        <td><span class="eti ${esc(n.tipo)}">${n.tipo === 'CORRECCION' ? 'Corrección' : 'Mejora'}</span></td>
+        <td><strong>${esc(n.titulo)}</strong><div class="detalle">${esc(n.detalle)}</div></td></tr>`).join('')
+      : '<tr><td colspan="3" class="vacio">Sin novedades.</td></tr>';
+  } catch(e){
+    tb.innerHTML = `<tr><td colspan="8" class="vacio">No se pudo cargar el historial: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function tablaAnomaliasHistorial(titulo, lista, total, etiqueta){
+  if (!total) return '';
+  const filas = lista.map(x => `<tr>
+      <td><span class="eti ${esc(x.severidad)}">${esc(x.severidad)}</span></td>
+      <td>${esc(nombreRegla(x.regla))}</td><td style="white-space:nowrap">${esc(x.fecha)}</td>
+      <td>${esc(x.guarda || x.cedula)}</td><td class="detalle">${esc(x.detalle)}</td></tr>`).join('');
+  const corte = total > lista.length ? `<p class="leyenda">Se muestran ${lista.length} de ${fmt(total)}.</p>` : '';
+  return `<h2><span class="eti ${etiqueta}">${fmt(total)}</span> ${titulo}</h2>
+    <div class="panel"><table><thead><tr><th>Severidad</th><th>Regla</th><th>Fecha</th><th>Guarda</th><th>Detalle</th></tr></thead>
+    <tbody>${filas}</tbody></table></div>${corte}`;
+}
+
+async function verCorrida(id){
+  document.querySelectorAll('#tablaHistorial tr').forEach(tr => tr.classList.toggle('sel', tr.dataset.id == id));
+  const caja = document.getElementById('detalleCorrida');
+  caja.innerHTML = '<p class="cargando">Cargando detalle…</p>';
+  try{
+    const c = await pedir(`/historial/${id}`);
+    const a = c.anomalias || {};
+    let html = `<h2>Detalle de la actualización del ${esc(fechaHora(c.inicio))}</h2>
+      <p class="nota">${esc(c.mensaje || '')}. Rango evaluado: ${esc(c.desde)} a ${esc(c.hasta)}.
+      ${c.version ? 'Versión del sistema: ' + esc(c.version.split(' ')[0]) + '.' : ''}</p>`;
+    html += tablaAnomaliasHistorial('anomalías corregidas (ya no aparecen en la malla)',
+                                    a.lista_corregidas || [], a.corregidas, 'CORREGIDA');
+    html += tablaAnomaliasHistorial('anomalías nuevas', a.lista_nuevas || [], a.nuevas, 'NUEVO');
+
+    Object.entries(c.meses || {}).forEach(([periodo, m]) => {
+      const cambios = (m.nuevos || 0) + (m.modificados || 0) + (m.borrados || 0);
+      html += `<h2>Cambios en la malla de ${esc(periodo)}</h2>
+        <p class="nota">${fmt(m.turnos)} turnos en SERPI: ${fmt(m.nuevos)} nuevos, ${fmt(m.modificados)} modificados,
+        ${fmt(m.borrados)} borrados${m.primera_carga ? ' — carga inicial del mes, por eso no se listan los nuevos' : ''}.</p>`;
+      if (!m.detalle || !m.detalle.length){
+        if (!cambios) html += '<p class="leyenda">Sin cambios frente a la actualización anterior.</p>';
+        return;
+      }
+      html += `<div class="panel"><table><thead><tr><th>Cambio</th><th>Fecha</th><th>Guarda</th><th>Puesto</th>
+        <th>Antes</th><th>Ahora</th></tr></thead><tbody>${m.detalle.map(d => `<tr>
+          <td><span class="eti ${esc(d.tipo)}">${esc(TIPO_CAMBIO[d.tipo] || d.tipo)}</span></td>
+          <td style="white-space:nowrap">${esc(d.fecha)}</td><td>${esc(d.guarda || d.cedula)}</td>
+          <td>${esc(d.puesto)}</td><td>${esc(d.antes || '—')}</td><td>${esc(d.despues || '—')}</td></tr>`).join('')}
+        </tbody></table></div>`;
+      if (m.detalle.length < cambios && !m.primera_carga)
+        html += `<p class="leyenda">Se muestran ${m.detalle.length} de ${fmt(cambios)} cambios.</p>`;
+    });
+    caja.innerHTML = html;
+    caja.scrollIntoView({behavior: 'smooth', block: 'start'});
+  } catch(e){
+    caja.innerHTML = `<p class="vacio">No se pudo cargar el detalle: ${esc(e.message)}</p>`;
+  }
 }
 
 // ---------- Arranque ----------
