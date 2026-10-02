@@ -10,6 +10,8 @@ archivo sin duplicar turnos (usa upsert sobre una llave natural).
 """
 
 import argparse
+import calendar
+import datetime as dt
 import os
 import re
 import sys
@@ -268,7 +270,7 @@ def get_connection():
 
 
 def reconciliar(cur, claves_turnos, claves_horas, puestos, fecha_min, fecha_max,
-                periodos, umbral_pct):
+                periodos, umbral_pct, completa=False):
     """Borra lo que ya NO viene en el archivo, dentro del alcance que el archivo
     realmente cubre.
 
@@ -285,6 +287,16 @@ def reconciliar(cur, claves_turnos, claves_horas, puestos, fecha_min, fecha_max,
     (p.ej. filtrado a un cliente) no puede borrar lo que no venia a reemplazar.
     Si un puesto entero desaparece de la malla sus turnos sobreviven: preferimos
     conservar de mas a borrar por una exportacion incompleta.
+
+    `completa=True` (--malla-completa) es para el reporte SIN filtros que baja
+    descargar_malla_serpi.py: los 67 clientes, el mes entero. Ahi un puesto
+    ausente NO es un export parcial, es un puesto que ya no existe o que SERPI
+    RENOMBRO — y conservar sus turnos es justo lo que no se puede: el guarda
+    queda en el puesto viejo y en el nuevo a la vez. Visto en produccion el
+    2026-10-02: «N.U PORTERIA - S-07 CELULAR» paso a «N.U PORTERIA - CELULAR»
+    y sus 220 turnos huerfanos fabricaron 163 CRUCE_DE_HORARIO (todas las
+    criticas de agosto) y ~180 jornadas de mas de 12 h. Con malla completa el
+    alcance son los MESES enteros del archivo, todos los puestos.
 
     `umbral_pct` es la red de seguridad para la corrida diaria desatendida: si el
     archivo llegara vacio o truncado por un fallo de SERPI, borrar seria
@@ -303,8 +315,17 @@ def reconciliar(cur, claves_turnos, claves_horas, puestos, fecha_min, fecha_max,
         sorted(claves_turnos))
     cur.execute("CREATE INDEX ON _archivo_turnos (guarda_cedula, puesto_id, fecha, slot)")
 
-    alcance = ("t.fecha BETWEEN %s AND %s AND t.puesto_id = ANY(%s)")
-    params = (fecha_min, fecha_max, lista_puestos)
+    if completa:
+        # Meses enteros, no el min/max de fechas con turno: un dia 1 sin
+        # turnos en el archivo nuevo no debe salvar los viejos de ese dia.
+        primero = min(dt.date(a, m, 1) for a, m in periodos)
+        a, m = max(periodos)
+        ultimo = dt.date(a, m, calendar.monthrange(a, m)[1])
+        alcance = "t.fecha BETWEEN %s AND %s"
+        params = (primero, ultimo)
+    else:
+        alcance = "t.fecha BETWEEN %s AND %s AND t.puesto_id = ANY(%s)"
+        params = (fecha_min, fecha_max, lista_puestos)
 
     cur.execute(f"SELECT count(*) FROM turnos t WHERE {alcance}", params)
     en_alcance = cur.fetchone()[0]
@@ -346,20 +367,20 @@ def reconciliar(cur, claves_turnos, claves_horas, puestos, fecha_min, fecha_max,
             sorted(claves_horas))
         cur.execute("""DELETE FROM horas_declaradas_mes h
                         WHERE (h.anio, h.mes) IN %s
-                          AND h.puesto_id = ANY(%s)
+                          AND (%s OR h.puesto_id = ANY(%s))
                           AND NOT EXISTS (SELECT 1 FROM _archivo_horas a
                                            WHERE a.guarda_cedula = h.guarda_cedula
                                              AND a.puesto_id = h.puesto_id
                                              AND a.slot = h.slot
                                              AND a.anio = h.anio
                                              AND a.mes = h.mes)""",
-                    (tuple(sorted(periodos)), lista_puestos))
+                    (tuple(sorted(periodos)), completa, lista_puestos))
         horas_borradas = cur.rowcount
 
     return {'turnos_borrados': turnos_borrados, 'horas_borradas': horas_borradas}
 
 
-def load(records, conn, reconciliacion=True, umbral_pct=20.0):
+def load(records, conn, reconciliacion=True, umbral_pct=20.0, completa=False):
     cur = conn.cursor()
 
     cliente_id = {}
@@ -481,7 +502,8 @@ def load(records, conn, reconciliacion=True, umbral_pct=20.0):
 
     if reconciliacion:
         stats.update(reconciliar(cur, claves_turnos, claves_horas, puestos_archivo,
-                                 fecha_min, fecha_max, periodos_archivo, umbral_pct))
+                                 fecha_min, fecha_max, periodos_archivo, umbral_pct,
+                                 completa=completa))
     else:
         stats.update({'turnos_borrados': 0, 'horas_borradas': 0})
 
@@ -500,6 +522,13 @@ def main():
                     help='Aborta si la reconciliacion borraria mas de este %% de los '
                          'turnos en alcance (default 20). Red de seguridad para la '
                          'corrida diaria: un archivo truncado no debe vaciar la base.')
+    ap.add_argument('--malla-completa', action='store_true',
+                    help='El archivo es el reporte de SERPI SIN filtros (todos los '
+                         'clientes, meses enteros), como el que baja '
+                         'descargar_malla_serpi.py. La reconciliacion cubre entonces '
+                         'todos los puestos de esos meses, asi que un puesto '
+                         'renombrado o eliminado en SERPI no deja turnos huerfanos. '
+                         'NO usar con un export filtrado a un cliente.')
     args = ap.parse_args()
 
     verificar_archivo(args.archivo)
@@ -528,7 +557,7 @@ def main():
     if not args.sin_reconciliar:
         print("  con reconciliacion: lo que ya no venga en el archivo se borra")
     stats = load(records, conn, reconciliacion=not args.sin_reconciliar,
-                 umbral_pct=args.umbral_borrado)
+                 umbral_pct=args.umbral_borrado, completa=args.malla_completa)
     conn.close()
 
     print("Listo:")

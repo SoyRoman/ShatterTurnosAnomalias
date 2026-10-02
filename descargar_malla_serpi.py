@@ -97,11 +97,22 @@ def descargar_xls_crudo(usuario, clave, fecha_desde, fecha_hasta, ruta_salida, t
     print(f"[4/4] Descarga cruda guardada en {ruta_salida}")
 
 
+def ruta_original(ruta_xlsx):
+    """Donde queda el archivo TAL CUAL lo entrego SERPI: mismo nombre, .xls."""
+    return os.path.splitext(ruta_xlsx)[0] + ".xls"
+
+
 def convertir_a_xlsx(ruta_cruda, ruta_xlsx):
     """SERPI entrega .xls (OLE2 binario). openpyxl solo lee .xlsx (OOXML), asi
     que convertimos hoja por hoja y celda por celda antes de entregarselo al
     ETL. Si SERPI alguna vez empieza a entregar OOXML real, esto detecta la
-    firma y copia el archivo tal cual, sin reconvertir de mas."""
+    firma y copia el archivo tal cual, sin reconvertir de mas.
+
+    La conversion copia solo VALORES: se pierden colores, celdas combinadas y
+    anchos. Por eso el original NO se borra: se conserva como .xls junto al
+    .xlsx, byte por byte igual a lo que entrego SERPI. El .xlsx es la copia de
+    trabajo del ETL; el .xls es el que se abre para ver el reporte como en
+    SERPI y el que sirve de evidencia de que se evaluo."""
     with open(ruta_cruda, "rb") as f:
         firma = f.read(8)
 
@@ -130,8 +141,9 @@ def convertir_a_xlsx(ruta_cruda, ruta_xlsx):
                 hoja_nueva.cell(row=r + 1, column=c + 1, value=valor)
 
     libro_nuevo.save(ruta_xlsx)
-    os.remove(ruta_cruda)
+    os.replace(ruta_cruda, ruta_original(ruta_xlsx))
     print(f"Convertido: {len(libro_viejo.sheet_names())} hojas -> {ruta_xlsx}")
+    print(f"Original de SERPI, sin modificar: {ruta_original(ruta_xlsx)}")
 
 
 def main():

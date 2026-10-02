@@ -342,11 +342,18 @@ def main():
             if args.solo_descarga:
                 continue
 
+            # Lo que baja este pipeline es SIEMPRE el reporte completo (todos los
+            # clientes, el mes entero): la reconciliación cubre todos los
+            # puestos, para que un puesto renombrado en SERPI no deje turnos
+            # huérfanos (ver etl_normalizacion.reconciliar). Un --archivo puede
+            # ser un export filtrado, así que ahí se mantiene el alcance por puesto.
+            completa = [] if args.archivo else ["--malla-completa"]
             rc, salida = ejecutar(f"2/3 ETL {tramo_desde} → {tramo_hasta} "
                                   "(normalización + reconciliación)", [
                 sys.executable, "etl_normalizacion.py",
                 "--archivo", ruta_malla,
                 "--umbral-borrado", str(args.umbral_borrado),
+                *completa,
             ], timeout_s=60 * 60)
             if rc != 0:
                 if MARCA_ABORTO_UMBRAL in salida:
