@@ -1,5 +1,11 @@
 [
   {
+    "fecha": "2026-10-13",
+    "tipo": "CORRECCION",
+    "titulo": "Semanas que cruzan de un mes a otro",
+    "detalle": "Una semana que empieza a fin de mes incluye días del mes siguiente. Al actualizarse solo el mes en curso, esas anomalías del mes anterior no se volvían a revisar cuando la malla del mes siguiente cambiaba. Ahora cada actualización también revisa el mes anterior, para que su veredicto y los turnos a los que apunta estén siempre al día."
+  },
+  {
     "fecha": "2026-10-02",
     "tipo": "MEJORA",
     "titulo": "Historial de actualizaciones",

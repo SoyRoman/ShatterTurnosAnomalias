@@ -162,6 +162,12 @@ def rango_por_defecto(meses):
     return primero.isoformat(), ultimo.isoformat()
 
 
+def mes_anterior(fecha):
+    """Primer día del mes anterior al de `fecha` ('YYYY-MM-DD')."""
+    d = dt.date.fromisoformat(fecha).replace(day=1)
+    return (d - dt.timedelta(days=1)).replace(day=1).isoformat()
+
+
 def meses_del_rango(desde, hasta):
     """Parte [desde, hasta] en tramos de un mes calendario: [(desde, hasta), ...].
 
@@ -468,8 +474,18 @@ def correr_pasos(args, desde, hasta, historial):
     # Se acota al mismo rango que se cargó: `_acotar` aplica ese filtro a
     # borrar_abiertas/marcar_resueltas/reabrir_reincidentes, así que sin él
     # la corrida marcaría estados sobre meses que hoy no se evaluaron.
+    #
+    # Pero el motor arranca un MES ANTES de lo cargado. Las ventanas de 7 días
+    # pertenecen al mes de su día de inicio (CLAUDE.md §7), así que una semana
+    # que empieza el 28 de septiembre incluye turnos del 1 al 4 de octubre. Si
+    # solo se evaluara octubre, esas anomalías de septiembre quedarían con la
+    # foto vieja de octubre: con un veredicto que pudo cambiar y apuntando a
+    # turnos que la recarga ya reemplazó (visto en producción el 2026-10-13: 12
+    # anomalías de septiembre con 32 referencias a turnos inexistentes). El mes
+    # anterior no se descarga ni se recarga: solo se reevalúa con lo que hay.
+    desde_motor = mes_anterior(desde)
     rc, salida = ejecutar("3/3 MOTOR DE REGLAS", [
-        sys.executable, "motor_reglas.py", "--desde", desde, "--hasta", hasta,
+        sys.executable, "motor_reglas.py", "--desde", desde_motor, "--hasta", hasta,
     ], timeout_s=60 * 60)
     if historial:
         historial.absorber(salida)
@@ -477,7 +493,7 @@ def correr_pasos(args, desde, hasta, historial):
         log.error("El motor falló. Los turnos SÍ se actualizaron, pero las "
                   "anomalías quedaron con la foto de ayer. Se puede reintentar "
                   "solo el motor: python motor_reglas.py --desde %s --hasta %s",
-                  desde, hasta)
+                  desde_motor, hasta)
         return 5
 
     log.info("CORRIDA COMPLETA sin errores.")
