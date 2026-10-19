@@ -2,7 +2,7 @@
 Corrida diaria desatendida: descarga la malla de SERPI, la normaliza y vuelve a
 evaluar las reglas.
 
-    python pipeline_diario.py                      # mes actual + el siguiente
+    python pipeline_diario.py                      # mes anterior, actual y siguiente
     python pipeline_diario.py --meses 1            # solo el mes actual
     python pipeline_diario.py --desde 2026-09-01 --hasta 2026-10-31
     python pipeline_diario.py --archivo malla.xlsx # omite la descarga (pruebas)
@@ -145,7 +145,7 @@ def soltar_candado():
 
 
 def rango_por_defecto(meses):
-    """Del primer día del mes actual al último día del mes (actual + meses - 1).
+    """Del primer día del mes ANTERIOR al último día del mes (actual + meses - 1).
 
     Por defecto son DOS meses, y no es arbitrario: la malla del mes entrante se
     carga en SERPI entre el 25 y el 27 (CLAUDE.md §1). Con un solo mes, la malla
@@ -154,7 +154,11 @@ def rango_por_defecto(meses):
     cargan y el programador tiene 3-4 días para arreglarla antes de que arranque.
     """
     hoy = dt.date.today()
-    primero = hoy.replace(day=1)
+    # Arranca en el mes ANTERIOR: el corte de facturación de los servicios
+    # ocasionales va del 21 del mes anterior al 20 (ver ocasionales.py), y un
+    # servicio del 28 registrado en SERPI después del día 1 nunca llegaría si
+    # el mes anterior no se volviera a descargar. Se quedaría sin facturar.
+    primero = (hoy.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
     anio, mes = hoy.year, hoy.month + meses - 1
     anio += (mes - 1) // 12
     mes = (mes - 1) % 12 + 1
@@ -280,7 +284,7 @@ def main():
                     help="Inicio del rango a descargar y evaluar")
     ap.add_argument("--hasta", metavar="YYYY-MM-DD", help="Fin del rango")
     ap.add_argument("--meses", type=int, default=2, metavar="N",
-                    help="Si no se dan --desde/--hasta: mes actual y los N-1 "
+                    help="Si no se dan --desde/--hasta: mes anterior, actual y los N-1 "
                          "siguientes (default 2; ver rango_por_defecto)")
     ap.add_argument("--archivo", metavar="RUTA",
                     help="Usa este .xlsx en vez de descargarlo. Para pruebas y "

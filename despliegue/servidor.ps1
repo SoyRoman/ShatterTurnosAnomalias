@@ -8,7 +8,7 @@
       logs              Bitacora de las ultimas corridas del pipeline
       logs-api          Ultimas lineas de la API
       pipeline          Lanza una corrida del pipeline ahora (descarga SERPI + ETL + motor).
-                        Sin fechas: mes actual + siguiente. Con -Desde/-Hasta: ese rango
+                        Sin fechas: mes anterior, actual y siguiente. Con -Desde/-Hasta: ese rango
       migrar            Aplica una migracion de esquema (migracion_NNN_*.sql) ya publicada
       usuarios          Lista las cuentas del dashboard
       crear-usuario     Crea una cuenta con clave temporal (se muestra una vez)

@@ -126,6 +126,7 @@
   <button class="activa" data-panel="gerencia" onclick="verPanel(this)">Gerencia</button>
   <button data-panel="programador" onclick="verPanel(this)">Programador<span class="cuenta" id="cuentaProg">0</span></button>
   <button data-panel="nomina" onclick="verPanel(this)">Nómina<span class="cuenta" id="cuentaNom">0</span></button>
+  <button data-panel="ocasionales" onclick="verPanel(this)">Servicios ocasionales</button>
   <button data-panel="historial" onclick="verPanel(this)">Historial</button>
   <button data-panel="admin" id="navAdmin" hidden onclick="verPanel(this)">Cuentas</button>
 </nav>
@@ -218,6 +219,30 @@
     <p class="leyenda">«Programado» son las horas que suman los turnos cargados en la malla para ese
       guarda-puesto-mes. Puede diferir legítimamente de lo declarado (ausencias, novedades posteriores);
       el <strong>descuadre</strong> —que el total no cuadre con sus propias categorías— es el que siempre es un error.</p>
+  </section>
+
+  <!-- ================= SERVICIOS OCASIONALES (todos los roles) ================= -->
+  <section id="ocasionales" class="oculto">
+    <h2>Servicios ocasionales del corte</h2>
+    <p class="nota">Servicios no permanentes (un fin de semana, un apoyo de un mes) para que no se queden sin
+      facturar. Son los puestos cuyo nombre contiene <strong>«Ocasional»</strong>. El corte va del 21 del mes
+      anterior al 20 del mes, y se va acumulando con cada actualización diaria.</p>
+    <div class="filtros">
+      <label class="sub">Corte <select id="corteOcasional" onchange="cargarOcasionales()"></select></label>
+      <span id="rangoOcasional" class="sub"></span>
+      <span class="crece"></span>
+      <button onclick="exportarOcasionales()">Exportar a Excel (CSV)</button>
+    </div>
+    <div class="tarjetas" id="kpisOcasional"></div>
+    <h2>Por servicio</h2>
+    <div class="panel"><table>
+      <thead><tr><th>Cliente</th><th>Puesto</th><th>Guardas</th><th class="num">Días</th><th class="num">Turnos</th>
+        <th class="num">Diurnas</th><th class="num">Nocturnas</th><th class="num">Dom./fest. diurnas</th>
+        <th class="num">Dom./fest. nocturnas</th><th class="num">Total horas</th></tr></thead>
+      <tbody id="tablaOcasional"></tbody>
+    </table></div>
+    <p class="leyenda" id="leyendaOcasional"></p>
+    <div id="detalleOcasional"></div>
   </section>
 
   <!-- ================= HISTORIAL (todos los roles) ================= -->
@@ -450,6 +475,7 @@ function mostrarPanel(nombre){
   document.getElementById(nombre).classList.remove('oculto');
   if (nombre === 'admin'){ cargarUsuarios(); cargarAccesos(); }
   if (nombre === 'historial') cargarHistorial();
+  if (nombre === 'ocasionales') iniciarOcasionales();
 }
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
@@ -795,6 +821,105 @@ async function cambiarRol(id, rol, usuario){
     await pedir('/usuarios/' + id, {method:'PATCH', body: JSON.stringify({rol})});
     cargarUsuarios();
   } catch(e){ alert(e.message); cargarUsuarios(); }
+}
+
+// ---------- Servicios ocasionales ----------
+let OCASIONAL = null;   // última respuesta, para el detalle y la exportación
+const DIAS_SEMANA = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+const fechaCorta = s => { const d = new Date(s + 'T00:00:00'); return `${DIAS_SEMANA[d.getDay()]} ${s}`; };
+const hhmm = s => s ? String(s).slice(0, 5) : '';
+
+async function iniciarOcasionales(){
+  const sel = document.getElementById('corteOcasional');
+  if (!sel.options.length){
+    try{
+      const cortes = await pedir('/ocasionales/cortes');
+      sel.innerHTML = cortes.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    } catch(e){ /* sin cortes: cargarOcasionales muestra el error */ }
+  }
+  cargarOcasionales();
+}
+
+async function cargarOcasionales(){
+  const tb = document.getElementById('tablaOcasional');
+  const corte = document.getElementById('corteOcasional').value;
+  document.getElementById('detalleOcasional').innerHTML = '';
+  tb.innerHTML = '<tr><td colspan="10" class="cargando">Cargando…</td></tr>';
+  try{
+    const r = OCASIONAL = await pedir('/ocasionales' + (corte ? `?corte=${encodeURIComponent(corte)}` : ''));
+    document.getElementById('rangoOcasional').textContent =
+      `del ${r.desde} al ${r.hasta} · datos al ${fechaHora(r.ultima_carga)}`;
+    const t = r.totales, h = t.horas;
+    document.getElementById('kpisOcasional').innerHTML = `
+      <div class="tarjeta"><div class="rotulo">Servicios</div><div class="cifra">${fmt(t.servicios)}</div>
+        <div class="pie">puestos ocasionales con turnos</div></div>
+      <div class="tarjeta"><div class="rotulo">Turnos</div><div class="cifra">${fmt(t.turnos)}</div>
+        <div class="pie">prestados en el corte</div></div>
+      <div class="tarjeta"><div class="rotulo">Horas</div><div class="cifra">${fmt(t.total_horas)}</div>
+        <div class="pie">${fmt(h.diurna)} diurnas · ${fmt(h.nocturna)} nocturnas</div></div>
+      <div class="tarjeta ambar"><div class="rotulo">Dominicales y festivas</div>
+        <div class="cifra">${fmt(h.diurna_festiva + h.nocturna_festiva)}</div>
+        <div class="pie">${fmt(h.diurna_festiva)} diurnas · ${fmt(h.nocturna_festiva)} nocturnas</div></div>`;
+    tb.innerHTML = r.servicios.length ? r.servicios.map((s, i) => `
+      <tr class="clic" data-i="${i}" onclick="verServicioOcasional(${i})">
+        <td>${esc(s.cliente)}</td><td>${esc(s.puesto)}</td>
+        <td class="detalle">${s.guardas.map(esc).join('<br>')}</td>
+        <td class="num">${fmt(s.dias)}</td><td class="num">${fmt(s.turnos)}</td>
+        <td class="num">${fmt(s.horas.diurna)}</td><td class="num">${fmt(s.horas.nocturna)}</td>
+        <td class="num">${fmt(s.horas.diurna_festiva)}</td><td class="num">${fmt(s.horas.nocturna_festiva)}</td>
+        <td class="num"><strong>${fmt(s.total_horas)}</strong></td></tr>`).join('')
+      : `<tr><td colspan="10" class="vacio">No hay servicios ocasionales en este corte. Recuerda que se
+          identifican porque el nombre del puesto contiene «Ocasional».</td></tr>`;
+    document.getElementById('leyendaOcasional').textContent =
+      `Horas nocturnas: ${r.nocturno}. Domingos y festivos de Colombia cuentan como dominicales/festivas. ` +
+      `Solo turnos trabajados: vacaciones, incapacidades y licencias no se facturan. ` +
+      `Haz clic en un servicio para ver los turnos día por día.`;
+  } catch(e){
+    tb.innerHTML = `<tr><td colspan="10" class="vacio">No se pudieron cargar los servicios ocasionales: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function verServicioOcasional(i){
+  const s = OCASIONAL.servicios[i];
+  document.querySelectorAll('#tablaOcasional tr').forEach(tr => tr.classList.toggle('sel', tr.dataset.i == i));
+  const caja = document.getElementById('detalleOcasional');
+  caja.innerHTML = `<h2>${esc(s.cliente)} · ${esc(s.puesto)}</h2>
+    <div class="panel"><table><thead><tr><th>Fecha</th><th>Guarda</th><th>Turno</th><th>Horario</th>
+      <th class="num">Diurnas</th><th class="num">Nocturnas</th><th class="num">Dom./fest. diurnas</th>
+      <th class="num">Dom./fest. nocturnas</th><th class="num">Total</th></tr></thead><tbody>
+    ${s.detalle.map(d => `<tr>
+      <td style="white-space:nowrap">${esc(fechaCorta(d.fecha))}${d.festivo ? ' <span class="eti ALTA">dom/fest</span>' : ''}</td>
+      <td>${esc(d.guarda)}</td><td>${esc(d.codigo)}</td><td>${esc(hhmm(d.inicio))}–${esc(hhmm(d.fin))}</td>
+      <td class="num">${fmt(d.horas.diurna)}</td><td class="num">${fmt(d.horas.nocturna)}</td>
+      <td class="num">${fmt(d.horas.diurna_festiva)}</td><td class="num">${fmt(d.horas.nocturna_festiva)}</td>
+      <td class="num"><strong>${fmt(d.total)}</strong></td></tr>`).join('')}
+    </tbody></table></div>`;
+  caja.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function exportarOcasionales(){
+  if (!OCASIONAL) return;
+  // Una fila por turno: es lo que facturación necesita para armar la factura
+  // y para responder si el cliente pregunta por un día concreto.
+  const cab = ['Corte', 'Cliente', 'Puesto', 'Fecha', 'Domingo/festivo', 'Guarda', 'Cédula', 'Turno',
+               'Inicio', 'Fin', 'Horas diurnas', 'Horas nocturnas', 'Horas dom/fest diurnas',
+               'Horas dom/fest nocturnas', 'Total horas'];
+  const filas = [cab];
+  OCASIONAL.servicios.forEach(s => s.detalle.forEach(d => filas.push([
+    OCASIONAL.corte, s.cliente, s.puesto, d.fecha, d.festivo ? 'Sí' : 'No', d.guarda, d.cedula, d.codigo,
+    hhmm(d.inicio), hhmm(d.fin), d.horas.diurna, d.horas.nocturna, d.horas.diurna_festiva,
+    d.horas.nocturna_festiva, d.total])));
+  // Punto y coma y coma decimal: así lo abre bien un Excel en español (Colombia).
+  const celda = v => {
+    const s = typeof v === 'number' ? String(v).replace('.', ',') : String(v ?? '');
+    return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = '﻿' + filas.map(f => f.map(celda).join(';')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv;charset=utf-8'}));
+  a.download = `servicios_ocasionales_${OCASIONAL.corte}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // ---------- Historial ----------

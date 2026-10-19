@@ -90,7 +90,7 @@ RUN python -m playwright install --with-deps chromium \
 
 USER turnos
 
-# Sin argumentos: mes actual + el siguiente (ver pipeline_diario.rango_por_defecto).
+# Sin argumentos: mes anterior, actual y siguiente (ver pipeline_diario.rango_por_defecto).
 # Se sobreescribe pasando argumentos al `docker compose run`.
 ENTRYPOINT ["python", "pipeline_diario.py"]
 CMD []

@@ -218,8 +218,19 @@ Aparece en `servidor.ps1 logs` y `estado` (`status=N`):
 ### La actualización diaria y los duplicados
 
 Programación cambia la malla en SERPI todos los días, así que el sistema la
-vuelve a descargar **todos los días a las 04:30** (mes actual y siguiente) y
-la compara con la anterior. Lo que garantiza que no queden datos duplicados:
+vuelve a descargar **todos los días a las 04:30** y la compara con la anterior.
+Descarga tres meses, uno por uno (SERPI no entrega más de uno por reporte):
+
+- **el anterior**, porque el corte de facturación de los servicios ocasionales
+  va del 21 al 20 y un servicio de fin de mes puede registrarse tarde;
+- **el actual**;
+- **el siguiente**, porque su malla se carga entre el 25 y el 27 y así sus
+  errores se ven antes de que entre en vigencia (si aún está vacío, se omite).
+
+Tarda unos 15 minutos. El motor de reglas reevalúa además un mes antes del
+primero descargado, por las semanas que cruzan de un mes a otro.
+
+Lo que garantiza que no queden datos duplicados:
 
 1. **Cada mes se reemplaza entero.** Lo que ya no viene en el reporte de SERPI
    se borra, aunque sea de un puesto que SERPI renombró o eliminó

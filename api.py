@@ -20,6 +20,7 @@ Variables de entorno adicionales a las de .env:
                          persona: no sustituye el login.
 """
 
+import datetime
 import json
 import os
 import subprocess
@@ -38,6 +39,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 import autenticacion as auth
+import ocasionales as oc
 
 load_dotenv()
 
@@ -312,6 +314,10 @@ PERMISOS = {
     '/historial':        _TODOS,
     '/novedades':        _TODOS,
 
+    # Servicios ocasionales del corte, para facturacion. Todos los roles
+    # (decision del usuario, 2026-10-19): facturacion no tiene rol propio.
+    '/ocasionales':      _TODOS,
+
     # Bandeja del programador: hallazgos puntuales.
     '/anomalias':        _MANDO | {'PROGRAMADOR'},
 
@@ -349,6 +355,7 @@ PERMISOS_PREFIJO = (
     # tiene que poder justificarlo.
     ('/anomalias/', _TODOS),
     ('/historial/', _TODOS),
+    ('/ocasionales/', _TODOS),
 )
 
 
@@ -360,6 +367,7 @@ PANELES = {
     'gerencia':    '/kpi',
     'programador': '/anomalias',
     'nomina':      '/nomina',
+    'ocasionales': '/ocasionales',
     'historial':   '/historial',
     'admin':       '/usuarios',
 }
@@ -843,6 +851,91 @@ def historial_corrida(corrida_id: int):
     if not fila:
         raise HTTPException(status_code=404, detail="Corrida no encontrada")
     return fila
+
+
+# ---------------------------------------------------------------------------
+# Servicios ocasionales (facturacion) — ver ocasionales.py
+# ---------------------------------------------------------------------------
+
+_SQL_TURNOS_OCASIONALES = """
+    SELECT t.fecha, t.slot, t.tipo_turno_codigo AS codigo, t.hora_inicio, t.hora_fin,
+           t.guarda_cedula AS cedula, g.nombre AS guarda,
+           p.id AS puesto_id, p.nombre AS puesto, c.nombre AS cliente
+    FROM turnos t
+    JOIN puestos p      ON p.id = t.puesto_id
+    JOIN clientes c     ON c.id = p.cliente_id
+    JOIN guardas g      ON g.cedula = t.guarda_cedula
+    JOIN tipos_turno tt ON tt.codigo = t.tipo_turno_codigo
+    WHERE t.fecha BETWEEN %s AND %s
+      AND tt.categoria = 'TRABAJADO'      -- vacaciones/incapacidades no se facturan
+      AND p.nombre ILIKE '%%ocasi%%'      -- prefiltro; el criterio fino es es_ocasional
+    ORDER BY c.nombre, p.nombre, t.fecha, g.nombre"""
+
+
+@app.get("/ocasionales/cortes", dependencies=[Depends(verificar_token)])
+def ocasionales_cortes():
+    """Cortes de facturacion con turnos cargados, del mas reciente al mas viejo."""
+    rango = consultar("SELECT min(fecha) AS desde, max(fecha) AS hasta FROM turnos", una=True)
+    if not rango or not rango['desde']:
+        return []
+    cortes, d = [], rango['desde']
+    while d <= rango['hasta']:
+        c = oc.corte_de(d)
+        if c not in cortes:
+            cortes.append(c)
+        d += datetime.timedelta(days=1)
+    return sorted(cortes, reverse=True)
+
+
+@app.get("/ocasionales", dependencies=[Depends(verificar_token)])
+def ocasionales(corte: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$")):
+    """Servicios ocasionales prestados en el corte (21 del mes anterior al 20),
+    acumulados hasta la ultima carga: por cliente y puesto, con cada turno y
+    sus horas separadas en diurnas, nocturnas y dominicales/festivas."""
+    corte = corte or oc.corte_de(datetime.date.today())
+    desde, hasta = oc.rango_corte(corte)
+    filas = consultar(_SQL_TURNOS_OCASIONALES, (desde, hasta))
+
+    servicios = {}
+    for f in filas:
+        if not oc.es_ocasional(f['puesto']):
+            continue
+        s = servicios.setdefault(f['puesto_id'], {
+            'cliente': f['cliente'], 'puesto': f['puesto'], 'guardas': set(),
+            'dias': set(), 'turnos': 0, 'horas': dict.fromkeys(oc.TIPOS, 0.0), 'detalle': []})
+        horas = oc.separar_horas(f['fecha'], f['hora_inicio'], f['hora_fin'])
+        s['guardas'].add(f['guarda'])
+        s['dias'].add(f['fecha'])
+        s['turnos'] += 1
+        for k, v in horas.items():
+            s['horas'][k] += v
+        s['detalle'].append({
+            'fecha': f['fecha'], 'festivo': oc.es_festivo(f['fecha']), 'guarda': f['guarda'],
+            'cedula': f['cedula'], 'codigo': f['codigo'],
+            'inicio': f['hora_inicio'], 'fin': f['hora_fin'],
+            'horas': horas, 'total': round(sum(horas.values()), 2)})
+
+    lista = []
+    for s in servicios.values():
+        s['horas'] = {k: round(v, 2) for k, v in s['horas'].items()}
+        s['total_horas'] = round(sum(s['horas'].values()), 2)
+        s['guardas'] = sorted(s['guardas'])
+        s['dias'] = len(s['dias'])
+        lista.append(s)
+    lista.sort(key=lambda s: (s['cliente'], s['puesto']))
+
+    ultima = consultar("SELECT max(fecha_carga) AS u FROM turnos", una=True)['u']
+    return {
+        'corte': corte, 'desde': desde, 'hasta': hasta, 'ultima_carga': ultima,
+        'nocturno': f"{oc.INICIO_NOCTURNO:%H:%M}-{oc.FIN_NOCTURNO:%H:%M}",
+        'servicios': lista,
+        'totales': {
+            'servicios': len(lista),
+            'turnos': sum(s['turnos'] for s in lista),
+            'horas': {k: round(sum(s['horas'][k] for s in lista), 2) for k in oc.TIPOS},
+            'total_horas': round(sum(s['total_horas'] for s in lista), 2),
+        },
+    }
 
 
 @app.get("/novedades", dependencies=[Depends(verificar_token)])

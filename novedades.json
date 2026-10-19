@@ -1,5 +1,17 @@
 [
   {
+    "fecha": "2026-10-19",
+    "tipo": "MEJORA",
+    "titulo": "Pestaña Servicios ocasionales",
+    "detalle": "Muestra los servicios no permanentes del corte de facturación (del 21 del mes anterior al 20) para que no se queden sin facturar: cliente, puesto, guardas y cada turno con sus horas diurnas, nocturnas y dominicales o festivas. Se identifican porque el nombre del puesto contiene «Ocasional». Se puede exportar a Excel."
+  },
+  {
+    "fecha": "2026-10-19",
+    "tipo": "MEJORA",
+    "titulo": "La actualización diaria incluye el mes anterior",
+    "detalle": "Un servicio de fin de mes registrado tarde en SERPI ahora sí llega al sistema, porque cada día se vuelve a descargar también el mes anterior."
+  },
+  {
     "fecha": "2026-10-13",
     "tipo": "CORRECCION",
     "titulo": "Semanas que cruzan de un mes a otro",
