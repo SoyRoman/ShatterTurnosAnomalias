@@ -3,7 +3,7 @@
     "fecha": "2026-10-19",
     "tipo": "MEJORA",
     "titulo": "Pestaña Servicios ocasionales",
-    "detalle": "Muestra los servicios no permanentes del corte de facturación (del 21 del mes anterior al 20) para que no se queden sin facturar: cliente, puesto, guardas y cada turno con sus horas diurnas, nocturnas y dominicales o festivas. Se identifican porque el nombre del puesto contiene «Ocasional». Se puede exportar a Excel."
+    "detalle": "Muestra los servicios no permanentes del corte de facturación (del 21 del mes anterior al 20) para que no se queden sin facturar: cliente, puesto, guardas y cada turno con sus horas diurnas, nocturnas y dominicales o festivas, valorizados con el cotizador de Gerencia: valor mínimo legal y valor ocasional (+20%). Cada servicio se marca con o sin arma, y queda registrado quién lo confirmó. Se identifican porque el nombre del puesto contiene «Ocasional». Se puede exportar a Excel."
   },
   {
     "fecha": "2026-10-19",

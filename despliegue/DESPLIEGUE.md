@@ -174,7 +174,8 @@ instalación desde cero la incluya.
 | Migración | Qué agrega | En producción |
 |---|---|---|
 | `migracion_004_usuarios.sql` | Cuentas, sesiones, bitácora de accesos | Aplicada por `bootstrap.sh` |
-| `migracion_005_historial.sql` | Tabla `corridas` (pestaña Historial) | **Aplicar al publicar la versión del 2026-10-02** |
+| `migracion_005_historial.sql` | Tabla `corridas` (pestaña Historial) | Aplicada (2026-10-02) |
+| `migracion_006_tarifas_ocasionales.sql` | Tarifas de vigilancia y modalidad con/sin arma de los servicios ocasionales | **Aplicar al publicar la versión del 2026-10-19** |
 
 ### Novedades del sistema
 

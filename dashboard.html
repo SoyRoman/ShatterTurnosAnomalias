@@ -236,9 +236,9 @@
     <div class="tarjetas" id="kpisOcasional"></div>
     <h2>Por servicio</h2>
     <div class="panel"><table>
-      <thead><tr><th>Cliente</th><th>Puesto</th><th>Guardas</th><th class="num">Días</th><th class="num">Turnos</th>
-        <th class="num">Diurnas</th><th class="num">Nocturnas</th><th class="num">Dom./fest. diurnas</th>
-        <th class="num">Dom./fest. nocturnas</th><th class="num">Total horas</th></tr></thead>
+      <thead><tr><th>Cliente</th><th>Puesto</th><th>Modalidad</th><th>Guardas</th><th class="num">Días</th>
+        <th class="num">Turnos</th><th class="num">Horas</th><th class="num">Valor mínimo legal</th>
+        <th class="num">Valor ocasional</th></tr></thead>
       <tbody id="tablaOcasional"></tbody>
     </table></div>
     <p class="leyenda" id="leyendaOcasional"></p>
@@ -840,42 +840,74 @@ async function iniciarOcasionales(){
   cargarOcasionales();
 }
 
+const pesos = n => (n === null || n === undefined) ? '—' :
+  '$' + Number(n).toLocaleString('es-CO', {maximumFractionDigits: 0});
+const MODALIDAD = {SIN_ARMA: 'Sin arma', CON_ARMA: 'Con arma'};
+
 async function cargarOcasionales(){
   const tb = document.getElementById('tablaOcasional');
   const corte = document.getElementById('corteOcasional').value;
   document.getElementById('detalleOcasional').innerHTML = '';
-  tb.innerHTML = '<tr><td colspan="10" class="cargando">Cargando…</td></tr>';
+  tb.innerHTML = '<tr><td colspan="9" class="cargando">Cargando…</td></tr>';
   try{
     const r = OCASIONAL = await pedir('/ocasionales' + (corte ? `?corte=${encodeURIComponent(corte)}` : ''));
     document.getElementById('rangoOcasional').textContent =
       `del ${r.desde} al ${r.hasta} · datos al ${fechaHora(r.ultima_carga)}`;
-    const t = r.totales, h = t.horas;
+    const t = r.totales;
     document.getElementById('kpisOcasional').innerHTML = `
+      <div class="tarjeta"><div class="rotulo">Valor ocasional</div><div class="cifra">${pesos(t.valor_ocasional)}</div>
+        <div class="pie">a facturar, antes de IVA</div></div>
+      <div class="tarjeta"><div class="rotulo">Valor mínimo legal</div><div class="cifra">${pesos(t.valor_basico)}</div>
+        <div class="pie">tarifa básica, sin sobrecosto</div></div>
       <div class="tarjeta"><div class="rotulo">Servicios</div><div class="cifra">${fmt(t.servicios)}</div>
-        <div class="pie">puestos ocasionales con turnos</div></div>
-      <div class="tarjeta"><div class="rotulo">Turnos</div><div class="cifra">${fmt(t.turnos)}</div>
-        <div class="pie">prestados en el corte</div></div>
-      <div class="tarjeta"><div class="rotulo">Horas</div><div class="cifra">${fmt(t.total_horas)}</div>
-        <div class="pie">${fmt(h.diurna)} diurnas · ${fmt(h.nocturna)} nocturnas</div></div>
-      <div class="tarjeta ambar"><div class="rotulo">Dominicales y festivas</div>
-        <div class="cifra">${fmt(h.diurna_festiva + h.nocturna_festiva)}</div>
-        <div class="pie">${fmt(h.diurna_festiva)} diurnas · ${fmt(h.nocturna_festiva)} nocturnas</div></div>`;
+        <div class="pie">${fmt(t.turnos)} turnos · ${fmt(t.total_horas)} horas</div></div>
+      <div class="tarjeta ${t.sin_confirmar ? 'roja' : ''}"><div class="rotulo">Modalidad sin confirmar</div>
+        <div class="cifra">${fmt(t.sin_confirmar)}</div>
+        <div class="pie">${t.sin_confirmar ? 'se valoran sin arma hasta confirmarlos' : 'todos confirmados'}</div></div>`;
     tb.innerHTML = r.servicios.length ? r.servicios.map((s, i) => `
       <tr class="clic" data-i="${i}" onclick="verServicioOcasional(${i})">
         <td>${esc(s.cliente)}</td><td>${esc(s.puesto)}</td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap">
+          <select onchange="cambiarModalidad(${s.puesto_id}, this.value)">
+            ${Object.entries(MODALIDAD).map(([k, v]) =>
+              `<option value="${k}" ${k === s.modalidad ? 'selected' : ''}>${v}</option>`).join('')}
+          </select>
+          <div class="detalle">${s.modalidad_confirmada
+            ? `confirmó ${esc(s.modalidad_por)}`
+            : '<span class="eti CRITICA">sin confirmar</span>'}</div></td>
         <td class="detalle">${s.guardas.map(esc).join('<br>')}</td>
         <td class="num">${fmt(s.dias)}</td><td class="num">${fmt(s.turnos)}</td>
-        <td class="num">${fmt(s.horas.diurna)}</td><td class="num">${fmt(s.horas.nocturna)}</td>
-        <td class="num">${fmt(s.horas.diurna_festiva)}</td><td class="num">${fmt(s.horas.nocturna_festiva)}</td>
-        <td class="num"><strong>${fmt(s.total_horas)}</strong></td></tr>`).join('')
-      : `<tr><td colspan="10" class="vacio">No hay servicios ocasionales en este corte. Recuerda que se
+        <td class="num"><strong>${fmt(s.total_horas)}</strong><div class="detalle" style="white-space:nowrap">
+          ${fmt(s.horas.diurna)} D · ${fmt(s.horas.nocturna)} N<br>
+          ${fmt(s.horas.diurna_festiva)} DF · ${fmt(s.horas.nocturna_festiva)} NF</div></td>
+        <td class="num">${pesos(s.valor_basico)}</td>
+        <td class="num"><strong>${pesos(s.valor_ocasional)}</strong></td></tr>`).join('')
+      : `<tr><td colspan="9" class="vacio">No hay servicios ocasionales en este corte. Recuerda que se
           identifican porque el nombre del puesto contiene «Ocasional».</td></tr>`;
-    document.getElementById('leyendaOcasional').textContent =
-      `Horas nocturnas: ${r.nocturno}. Domingos y festivos de Colombia cuentan como dominicales/festivas. ` +
-      `Solo turnos trabajados: vacaciones, incapacidades y licencias no se facturan. ` +
-      `Haz clic en un servicio para ver los turnos día por día.`;
+    const tf = r.tarifa;
+    document.getElementById('leyendaOcasional').innerHTML = tf ? `
+      <strong>Tarifa aplicada</strong> (vigente del ${esc(tf.vigente_desde)} al ${esc(tf.vigente_hasta || '—')}):
+      hora diurna ${pesos(tf.valor_hora.SIN_ARMA.diurna)} sin arma / ${pesos(tf.valor_hora.CON_ARMA.diurna)} con arma;
+      hora nocturna ${pesos(tf.valor_hora.SIN_ARMA.nocturna)} / ${pesos(tf.valor_hora.CON_ARMA.nocturna)}.
+      Domingos y festivos llevan recargo del ${fmt(tf.recargo_festivo * 100)}%; el valor ocasional suma un
+      sobrecosto del ${fmt(tf.sobrecosto_ocasional * 100)}%. D = diurnas (6:00–19:00), N = nocturnas,
+      DF/NF = en domingo o festivo. Solo turnos trabajados. Valores antes de IVA.
+      ${r.dias_sin_tarifa.length ? `<br><span class="eti CRITICA">Sin tarifa cargada para ${r.dias_sin_tarifa.length} día(s): esos turnos no tienen valor.</span>` : ''}
+      <br>Haz clic en un servicio para ver los turnos día por día.`
+      : '<span class="eti CRITICA">No hay tarifas cargadas: falta aplicar migracion_006_tarifas_ocasionales.sql.</span>';
   } catch(e){
-    tb.innerHTML = `<tr><td colspan="10" class="vacio">No se pudieron cargar los servicios ocasionales: ${esc(e.message)}</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="9" class="vacio">No se pudieron cargar los servicios ocasionales: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function cambiarModalidad(puestoId, modalidad){
+  // Cambia el valor que se factura: el servidor deja rastro de quién lo hizo.
+  try{
+    await pedir(`/ocasionales/puesto/${puestoId}`, {method: 'PATCH', body: JSON.stringify({modalidad})});
+    await cargarOcasionales();
+  } catch(e){
+    alert('No se pudo guardar la modalidad: ' + e.message);
+    cargarOcasionales();
   }
 }
 
@@ -883,16 +915,17 @@ function verServicioOcasional(i){
   const s = OCASIONAL.servicios[i];
   document.querySelectorAll('#tablaOcasional tr').forEach(tr => tr.classList.toggle('sel', tr.dataset.i == i));
   const caja = document.getElementById('detalleOcasional');
-  caja.innerHTML = `<h2>${esc(s.cliente)} · ${esc(s.puesto)}</h2>
+  caja.innerHTML = `<h2>${esc(s.cliente)} · ${esc(s.puesto)} · ${esc(MODALIDAD[s.modalidad])}</h2>
     <div class="panel"><table><thead><tr><th>Fecha</th><th>Guarda</th><th>Turno</th><th>Horario</th>
-      <th class="num">Diurnas</th><th class="num">Nocturnas</th><th class="num">Dom./fest. diurnas</th>
-      <th class="num">Dom./fest. nocturnas</th><th class="num">Total</th></tr></thead><tbody>
+      <th class="num">D</th><th class="num">N</th><th class="num">DF</th><th class="num">NF</th>
+      <th class="num">Horas</th><th class="num">Valor mínimo</th><th class="num">Valor ocasional</th></tr></thead><tbody>
     ${s.detalle.map(d => `<tr>
       <td style="white-space:nowrap">${esc(fechaCorta(d.fecha))}${d.festivo ? ' <span class="eti ALTA">dom/fest</span>' : ''}</td>
       <td>${esc(d.guarda)}</td><td>${esc(d.codigo)}</td><td>${esc(hhmm(d.inicio))}–${esc(hhmm(d.fin))}</td>
       <td class="num">${fmt(d.horas.diurna)}</td><td class="num">${fmt(d.horas.nocturna)}</td>
       <td class="num">${fmt(d.horas.diurna_festiva)}</td><td class="num">${fmt(d.horas.nocturna_festiva)}</td>
-      <td class="num"><strong>${fmt(d.total)}</strong></td></tr>`).join('')}
+      <td class="num"><strong>${fmt(d.total)}</strong></td>
+      <td class="num">${pesos(d.valor_basico)}</td><td class="num"><strong>${pesos(d.valor_ocasional)}</strong></td></tr>`).join('')}
     </tbody></table></div>`;
   caja.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
@@ -901,14 +934,16 @@ function exportarOcasionales(){
   if (!OCASIONAL) return;
   // Una fila por turno: es lo que facturación necesita para armar la factura
   // y para responder si el cliente pregunta por un día concreto.
-  const cab = ['Corte', 'Cliente', 'Puesto', 'Fecha', 'Domingo/festivo', 'Guarda', 'Cédula', 'Turno',
-               'Inicio', 'Fin', 'Horas diurnas', 'Horas nocturnas', 'Horas dom/fest diurnas',
-               'Horas dom/fest nocturnas', 'Total horas'];
+  const cab = ['Corte', 'Cliente', 'Puesto', 'Modalidad', 'Modalidad confirmada', 'Fecha', 'Domingo/festivo',
+               'Guarda', 'Cédula', 'Turno', 'Inicio', 'Fin', 'Horas diurnas', 'Horas nocturnas',
+               'Horas dom/fest diurnas', 'Horas dom/fest nocturnas', 'Total horas',
+               'Valor mínimo legal', 'Valor ocasional'];
   const filas = [cab];
   OCASIONAL.servicios.forEach(s => s.detalle.forEach(d => filas.push([
-    OCASIONAL.corte, s.cliente, s.puesto, d.fecha, d.festivo ? 'Sí' : 'No', d.guarda, d.cedula, d.codigo,
-    hhmm(d.inicio), hhmm(d.fin), d.horas.diurna, d.horas.nocturna, d.horas.diurna_festiva,
-    d.horas.nocturna_festiva, d.total])));
+    OCASIONAL.corte, s.cliente, s.puesto, MODALIDAD[s.modalidad], s.modalidad_confirmada ? 'Sí' : 'No',
+    d.fecha, d.festivo ? 'Sí' : 'No', d.guarda, d.cedula, d.codigo, hhmm(d.inicio), hhmm(d.fin),
+    d.horas.diurna, d.horas.nocturna, d.horas.diurna_festiva, d.horas.nocturna_festiva, d.total,
+    d.valor_basico, d.valor_ocasional])));
   // Punto y coma y coma decimal: así lo abre bien un Excel en español (Colombia).
   const celda = v => {
     const s = typeof v === 'number' ? String(v).replace('.', ',') : String(v ?? '');

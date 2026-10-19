@@ -895,25 +895,49 @@ def ocasionales(corte: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$")):
     corte = corte or oc.corte_de(datetime.date.today())
     desde, hasta = oc.rango_corte(corte)
     filas = consultar(_SQL_TURNOS_OCASIONALES, (desde, hasta))
+    tarifas = consultar("SELECT * FROM tarifas_vigilancia ORDER BY vigente_desde")
+    modalidades = {m['puesto_id']: m for m in consultar(
+        "SELECT puesto_id, modalidad, nota, actualizado_por, actualizado_en FROM ocasionales_puesto")}
 
     servicios = {}
+    sin_tarifa = set()
     for f in filas:
         if not oc.es_ocasional(f['puesto']):
             continue
+        conf = modalidades.get(f['puesto_id'])
         s = servicios.setdefault(f['puesto_id'], {
-            'cliente': f['cliente'], 'puesto': f['puesto'], 'guardas': set(),
-            'dias': set(), 'turnos': 0, 'horas': dict.fromkeys(oc.TIPOS, 0.0), 'detalle': []})
+            'puesto_id': f['puesto_id'], 'cliente': f['cliente'], 'puesto': f['puesto'],
+            # Sin confirmar se valora SIN arma (la tarifa menor), y el
+            # dashboard lo marca para que facturacion lo confirme.
+            'modalidad': conf['modalidad'] if conf else 'SIN_ARMA',
+            'modalidad_confirmada': bool(conf),
+            'modalidad_por': conf['actualizado_por'] if conf else None,
+            'modalidad_en': conf['actualizado_en'] if conf else None,
+            'guardas': set(), 'dias': set(), 'turnos': 0,
+            'horas': dict.fromkeys(oc.TIPOS, 0.0), 'valor_basico': 0, 'valor_ocasional': 0,
+            'detalle': []})
         horas = oc.separar_horas(f['fecha'], f['hora_inicio'], f['hora_fin'])
+        # Cada turno con la tarifa vigente en SU fecha: un corte que cruza el
+        # 1 de enero valora diciembre con el SMLMV viejo y enero con el nuevo.
+        t = oc.tarifa_de(f['fecha'], tarifas)
+        valor = oc.valorizar(horas, t, s['modalidad']) if t else None
+        if valor is None:
+            sin_tarifa.add(f['fecha'])
         s['guardas'].add(f['guarda'])
         s['dias'].add(f['fecha'])
         s['turnos'] += 1
         for k, v in horas.items():
             s['horas'][k] += v
+        if valor:
+            s['valor_basico'] += valor['basico']
+            s['valor_ocasional'] += valor['ocasional']
         s['detalle'].append({
             'fecha': f['fecha'], 'festivo': oc.es_festivo(f['fecha']), 'guarda': f['guarda'],
             'cedula': f['cedula'], 'codigo': f['codigo'],
             'inicio': f['hora_inicio'], 'fin': f['hora_fin'],
-            'horas': horas, 'total': round(sum(horas.values()), 2)})
+            'horas': horas, 'total': round(sum(horas.values()), 2),
+            'valor_basico': valor['basico'] if valor else None,
+            'valor_ocasional': valor['ocasional'] if valor else None})
 
     lista = []
     for s in servicios.values():
@@ -924,18 +948,74 @@ def ocasionales(corte: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$")):
         lista.append(s)
     lista.sort(key=lambda s: (s['cliente'], s['puesto']))
 
+    vigente = oc.tarifa_de(hasta, tarifas) or (tarifas[-1] if tarifas else None)
     ultima = consultar("SELECT max(fecha_carga) AS u FROM turnos", una=True)['u']
     return {
         'corte': corte, 'desde': desde, 'hasta': hasta, 'ultima_carga': ultima,
         'nocturno': f"{oc.INICIO_NOCTURNO:%H:%M}-{oc.FIN_NOCTURNO:%H:%M}",
+        'tarifa': vigente and {
+            'vigente_desde': vigente['vigente_desde'], 'vigente_hasta': vigente['vigente_hasta'],
+            'smlmv': vigente['smlmv'], 'recargo_festivo': vigente['recargo_festivo'],
+            'sobrecosto_ocasional': vigente['sobrecosto_ocasional'], 'fuente': vigente['fuente'],
+            'valor_hora': {m: {k: round(v) for k, v in oc.valores_hora(vigente, m).items()}
+                           for m in oc.MODALIDADES}},
+        'dias_sin_tarifa': sorted(sin_tarifa),
         'servicios': lista,
         'totales': {
             'servicios': len(lista),
             'turnos': sum(s['turnos'] for s in lista),
             'horas': {k: round(sum(s['horas'][k] for s in lista), 2) for k in oc.TIPOS},
             'total_horas': round(sum(s['total_horas'] for s in lista), 2),
+            'valor_basico': sum(s['valor_basico'] for s in lista),
+            'valor_ocasional': sum(s['valor_ocasional'] for s in lista),
+            'sin_confirmar': sum(1 for s in lista if not s['modalidad_confirmada']),
         },
     }
+
+
+class CambioModalidad(BaseModel):
+    modalidad: Literal['SIN_ARMA', 'CON_ARMA']
+    nota: Optional[str] = Field(None, max_length=500)
+
+
+@app.patch("/ocasionales/puesto/{puesto_id}", dependencies=[Depends(verificar_token)])
+def cambiar_modalidad(puesto_id: int, cambio: CambioModalidad,
+                      quien: str = Depends(resolver_identidad)):
+    """Confirma si un servicio ocasional es con o sin arma (cambia la tarifa).
+    Queda en el historial quien lo cambio, cuando y de que a que, en la misma
+    transaccion: el valor que se factura no puede cambiar sin dejar rastro."""
+    puesto = consultar("SELECT nombre FROM puestos WHERE id = %s", (puesto_id,), una=True)
+    if not puesto:
+        raise HTTPException(status_code=404, detail="Puesto no encontrado")
+    if not oc.es_ocasional(puesto['nombre']):
+        raise HTTPException(status_code=422, detail="El puesto no es un servicio ocasional")
+    conn = _pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT modalidad FROM ocasionales_puesto WHERE puesto_id = %s FOR UPDATE",
+                        (puesto_id,))
+            antes = cur.fetchone()
+            cur.execute(
+                """INSERT INTO ocasionales_puesto (puesto_id, modalidad, nota, actualizado_por, actualizado_en)
+                   VALUES (%s, %s, %s, %s, now())
+                   ON CONFLICT (puesto_id) DO UPDATE
+                      SET modalidad = EXCLUDED.modalidad, nota = EXCLUDED.nota,
+                          actualizado_por = EXCLUDED.actualizado_por, actualizado_en = now()
+                   RETURNING puesto_id, modalidad, nota, actualizado_por, actualizado_en""",
+                (puesto_id, cambio.modalidad, cambio.nota, quien))
+            fila = cur.fetchone()
+            cur.execute(
+                """INSERT INTO ocasionales_puesto_historial
+                       (puesto_id, modalidad_antes, modalidad_nueva, nota, usuario)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (puesto_id, antes['modalidad'] if antes else None, cambio.modalidad, cambio.nota, quien))
+        conn.commit()
+        return fila
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _pool.putconn(conn)
 
 
 @app.get("/novedades", dependencies=[Depends(verificar_token)])

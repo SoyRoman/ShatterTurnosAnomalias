@@ -139,3 +139,49 @@ def separar_horas(fecha, inicio, fin):
         horas[clave] += (siguiente - t).total_seconds() / 3600
         t = siguiente
     return {k: round(v, 2) for k, v in horas.items()}
+
+
+# ---------------------------------------------------------------------------
+# Valorizacion — reproduce el cotizador de Gerencia
+# (Entradas/Cotizador_Vigilancia_2026.xlsx, hojas Parametros y Ocasional)
+# ---------------------------------------------------------------------------
+# Los valores vienen de la tabla tarifas_vigilancia (migracion_006): una fila
+# por vigencia. Aqui solo estan las formulas.
+
+MODALIDADES = ('SIN_ARMA', 'CON_ARMA')
+
+
+def tarifa_24h(t, modalidad):
+    """Tarifa minima 24 h / 30 dias por puesto (Ocasional!C16):
+    (SMLMV x factor + seguro de vida del puesto) x (1 + A&S)."""
+    seguro = float(t['seguro_vida_guarda']) * float(t['guardas_por_puesto'])
+    adm = float(t['as_con_arma'] if modalidad == 'CON_ARMA' else t['as_sin_arma'])
+    return (float(t['smlmv']) * float(t['factor_smlmv']) + seguro) * (1 + adm)
+
+
+def valores_hora(t, modalidad):
+    """Valor de la hora minima legal por tipo (Ocasional!D23:D26). Los
+    domingos y festivos llevan el recargo sobre la hora diurna o nocturna."""
+    base = tarifa_24h(t, modalidad)
+    diurna = base * float(t['prop_diurna']) / 30 / float(t['jornada_diurna'])
+    nocturna = base * float(t['prop_nocturna']) / 30 / float(t['jornada_nocturna'])
+    rec = 1 + float(t['recargo_festivo'])
+    return {'diurna': diurna, 'nocturna': nocturna,
+            'diurna_festiva': diurna * rec, 'nocturna_festiva': nocturna * rec}
+
+
+def valorizar(horas, t, modalidad):
+    """Valor minimo legal (basico) y valor a cobrar como ocasional, en pesos y
+    antes de IVA. El sobrecosto ocasional se aplica sobre el total, incluido el
+    recargo dominical/festivo (Ocasional!C30:C32)."""
+    vh = valores_hora(t, modalidad)
+    basico = sum(horas[k] * vh[k] for k in TIPOS)
+    return {'basico': round(basico), 'ocasional': round(basico * (1 + float(t['sobrecosto_ocasional'])))}
+
+
+def tarifa_de(fecha, tarifas):
+    """La tarifa vigente en `fecha`, o None si no hay ninguna cargada."""
+    for t in tarifas:
+        if t['vigente_desde'] <= fecha and (t['vigente_hasta'] is None or fecha <= t['vigente_hasta']):
+            return t
+    return None
