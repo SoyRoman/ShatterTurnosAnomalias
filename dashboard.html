@@ -562,7 +562,8 @@ async function cargarProgramador(){
 function filaProg(a){
   return `<tr>
     <td><span class="eti ${a.severidad}">${a.severidad}</span></td>
-    <td>${esc(a.regla.replaceAll('_',' ').toLowerCase())}</td>
+    <td>${esc(a.regla.replaceAll('_',' ').toLowerCase())}${a.etiqueta
+      ? `<div><span class="eti BAJA" title="Cargo en SERPI: ${esc(a.cargo_serpi || 'sin dato')}">${esc(a.etiqueta)}</span></div>` : ''}</td>
     <td>${esc(a.guarda_nombre)}<div class="detalle">${esc(a.guarda_cedula)}</div></td>
     <td>${esc(a.fecha_referencia)}</td>
     <td class="detalle">${esc(a.detalle)}</td>
@@ -646,6 +647,9 @@ async function abrirGestion(id){
   document.getElementById('mContexto').innerHTML = `
     <p><strong>${esc(a.guarda_nombre)}</strong> (${esc(a.guarda_cedula)}) — ${esc(a.fecha_referencia)}</p>
     <p class="detalle">${esc(a.detalle)}</p>
+    ${a.etiqueta ? `<p class="aviso"><strong>${esc(a.etiqueta)}.</strong> Parece un supervisor haciendo un
+      servicio de escolta dentro de su propio turno (cargo en SERPI: ${esc(a.cargo_serpi || 'sin dato')}).
+      Si es así, márcala <strong>Justificada</strong> con una nota que lo explique.</p>` : ''}
     <p class="detalle"><em>${esc(a.fundamento_legal || '')}</em></p>
     ${a.turnos && a.turnos.length ? `<div class="panel" style="margin-top:12px"><table>
       <thead><tr><th>Fecha</th><th>Turno</th><th>Horario</th><th>Puesto</th></tr></thead>
@@ -866,7 +870,10 @@ async function cargarOcasionales(){
         <div class="pie">${t.sin_confirmar ? 'se valoran sin arma hasta confirmarlos' : 'todos confirmados'}</div></div>`;
     tb.innerHTML = r.servicios.length ? r.servicios.map((s, i) => `
       <tr class="clic" data-i="${i}" onclick="verServicioOcasional(${i})">
-        <td>${esc(s.cliente)}</td><td>${esc(s.puesto)}</td>
+        <td>${esc(s.cliente)}<div class="detalle">${s.nit
+          ? `NIT ${esc(s.nit)} · ${esc(s.zona || '')}`
+          : '<span class="eti ALTA" title="El puesto no se encontró en el catálogo de la API de SERPI">sin vínculo en SERPI</span>'}</div></td>
+        <td>${esc(s.puesto)}</td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap">
           <select onchange="cambiarModalidad(${s.puesto_id}, this.value)">
             ${Object.entries(MODALIDAD).map(([k, v]) =>
@@ -934,13 +941,13 @@ function exportarOcasionales(){
   if (!OCASIONAL) return;
   // Una fila por turno: es lo que facturación necesita para armar la factura
   // y para responder si el cliente pregunta por un día concreto.
-  const cab = ['Corte', 'Cliente', 'Puesto', 'Modalidad', 'Modalidad confirmada', 'Fecha', 'Domingo/festivo',
+  const cab = ['Corte', 'Cliente', 'NIT', 'Centro de operación', 'Zona', 'Puesto', 'Modalidad', 'Modalidad confirmada', 'Fecha', 'Domingo/festivo',
                'Guarda', 'Cédula', 'Turno', 'Inicio', 'Fin', 'Horas diurnas', 'Horas nocturnas',
                'Horas dom/fest diurnas', 'Horas dom/fest nocturnas', 'Total horas',
                'Valor mínimo legal', 'Valor ocasional'];
   const filas = [cab];
   OCASIONAL.servicios.forEach(s => s.detalle.forEach(d => filas.push([
-    OCASIONAL.corte, s.cliente, s.puesto, MODALIDAD[s.modalidad], s.modalidad_confirmada ? 'Sí' : 'No',
+    OCASIONAL.corte, s.cliente, s.nit || '', s.centro_operacion || '', s.zona || '', s.puesto, MODALIDAD[s.modalidad], s.modalidad_confirmada ? 'Sí' : 'No',
     d.fecha, d.festivo ? 'Sí' : 'No', d.guarda, d.cedula, d.codigo, hhmm(d.inicio), hhmm(d.fin),
     d.horas.diurna, d.horas.nocturna, d.horas.diurna_festiva, d.horas.nocturna_festiva, d.total,
     d.valor_basico, d.valor_ocasional])));

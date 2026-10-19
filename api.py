@@ -630,6 +630,11 @@ def consultar(sql: str, params=(), una=False):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             return cur.fetchone() if una else cur.fetchall()
+    except psycopg2.Error:
+        # Sin esto la conexion vuelve al pool con la transaccion abortada y la
+        # siguiente peticion que la reciba falla por algo que no hizo.
+        conn.rollback()
+        raise
     finally:
         _pool.putconn(conn)
 
@@ -769,7 +774,45 @@ def anomalias(
             LIMIT %s OFFSET %s""",
         params + [por_pagina, (pagina - 1) * por_pagina],
     )
-    return {"total": total, "pagina": pagina, "por_pagina": por_pagina, "datos": filas}
+    return {"total": total, "pagina": pagina, "por_pagina": por_pagina, "datos": _etiquetar(filas)}
+
+
+_CARGOS_MANDO = ('SUPERVISOR', 'ESCOLTA', 'COORDINADOR')
+
+
+def _etiquetar(filas):
+    """Marca los cruces de horario que parecen un supervisor haciendo un
+    servicio de escolta dentro de su propio turno.
+
+    Acordado con Gerencia (oct-2026): esos cruces NO se excluyen de la regla
+    (un cruce real de un supervisor tambien tiene que verse); se justifican uno
+    por uno. La etiqueta solo sirve para reconocerlos rapido. Se marca si el
+    cruce involucra un puesto de ESCOLTA y ademas el otro puesto es de
+    supervisor o el cargo del guarda en SERPI (catalogos_serpi) es de mando.
+    """
+    cruces = [f for f in filas if f.get('regla') == 'CRUCE_DE_HORARIO']
+    if not cruces:
+        return filas
+    from catalogos_serpi import normalizar
+    nombres = sorted({normalizar(f.get('guarda_nombre')) for f in cruces})
+    cargos = {}
+    try:
+        for r in consultar("""SELECT colaborador_norm, string_agg(DISTINCT cargo, ', ') AS cargos
+                              FROM serpi_asignaciones WHERE colaborador_norm = ANY(%s)
+                              GROUP BY colaborador_norm""", (nombres,)):
+            cargos[r['colaborador_norm']] = r['cargos']
+    except psycopg2.Error:
+        # Sin catalogos (migracion_007 sin aplicar): la etiqueta se apoya solo
+        # en el detalle. Una etiqueta nunca puede tumbar la bandeja.
+        pass
+    for f in cruces:
+        detalle = normalizar(f.get('detalle'))
+        cargo = cargos.get(normalizar(f.get('guarda_nombre')))
+        f['cargo_serpi'] = cargo
+        de_mando = 'SUPERVISOR' in detalle or any(c in normalizar(cargo) for c in _CARGOS_MANDO)
+        if 'ESCOLTA' in detalle and de_mando:
+            f['etiqueta'] = 'Supervisor con escolta'
+    return filas
 
 
 @app.get("/anomalias/{anomalia_id}", dependencies=[Depends(verificar_token)])
@@ -794,6 +837,7 @@ def anomalia(anomalia_id: int):
            FROM anomalias_historial WHERE anomalia_id = %s ORDER BY ocurrido_en""",
         (anomalia_id,),
     )
+    _etiquetar([cab])
     return {**cab, "turnos": turnos, "historial": historial}
 
 
@@ -860,12 +904,17 @@ def historial_corrida(corrida_id: int):
 _SQL_TURNOS_OCASIONALES = """
     SELECT t.fecha, t.slot, t.tipo_turno_codigo AS codigo, t.hora_inicio, t.hora_fin,
            t.guarda_cedula AS cedula, g.nombre AS guarda,
-           p.id AS puesto_id, p.nombre AS puesto, c.nombre AS cliente
+           p.id AS puesto_id, p.nombre AS puesto, c.nombre AS cliente,
+           sp.nit, sp.centro_operacion, sp.zona, sv.gdtproyectoactid AS serpi_puesto_id
     FROM turnos t
     JOIN puestos p      ON p.id = t.puesto_id
     JOIN clientes c     ON c.id = p.cliente_id
     JOIN guardas g      ON g.cedula = t.guarda_cedula
     JOIN tipos_turno tt ON tt.codigo = t.tipo_turno_codigo
+    -- NIT, centro de operacion y zona vienen del catalogo de la API de SERPI
+    -- (catalogos_serpi.py). LEFT JOIN: un puesto sin vinculo se factura igual.
+    LEFT JOIN serpi_puesto_vinculo sv ON sv.puesto_id = p.id
+    LEFT JOIN serpi_proyectos sp      ON sp.gdtproyectoid = sv.gdtproyectoid
     WHERE t.fecha BETWEEN %s AND %s
       AND tt.categoria = 'TRABAJADO'      -- vacaciones/incapacidades no se facturan
       AND p.nombre ILIKE '%%ocasi%%'      -- prefiltro; el criterio fino es es_ocasional
@@ -907,6 +956,8 @@ def ocasionales(corte: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$")):
         conf = modalidades.get(f['puesto_id'])
         s = servicios.setdefault(f['puesto_id'], {
             'puesto_id': f['puesto_id'], 'cliente': f['cliente'], 'puesto': f['puesto'],
+            'nit': f['nit'], 'centro_operacion': f['centro_operacion'], 'zona': f['zona'],
+            'serpi_puesto_id': f['serpi_puesto_id'],
             # Sin confirmar se valora SIN arma (la tarifa menor), y el
             # dashboard lo marca para que facturacion lo confirme.
             'modalidad': conf['modalidad'] if conf else 'SIN_ARMA',

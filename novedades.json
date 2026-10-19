@@ -2,6 +2,18 @@
   {
     "fecha": "2026-10-19",
     "tipo": "MEJORA",
+    "titulo": "Datos de la API de SERPI: NIT y zona",
+    "detalle": "Cada día el sistema consulta los catálogos de la nueva API de turnos de SERPI. Los servicios ocasionales muestran ahora el NIT del cliente, la zona y el centro de operación (también en el Excel exportado). Si un puesto no está en la API, se marca «sin vínculo en SERPI»."
+  },
+  {
+    "fecha": "2026-10-19",
+    "tipo": "MEJORA",
+    "titulo": "Etiqueta «Supervisor con escolta» en los cruces",
+    "detalle": "Los cruces de horario donde un supervisor hace un servicio de escolta dentro de su turno se marcan para reconocerlos rápido. La regla no cambia: siguen apareciendo y se justifican uno por uno con una nota."
+  },
+  {
+    "fecha": "2026-10-19",
+    "tipo": "MEJORA",
     "titulo": "Pestaña Servicios ocasionales",
     "detalle": "Muestra los servicios no permanentes del corte de facturación (del 21 del mes anterior al 20) para que no se queden sin facturar: cliente, puesto, guardas y cada turno con sus horas diurnas, nocturnas y dominicales o festivas, valorizados con el cotizador de Gerencia: valor mínimo legal y valor ocasional (+20%). Cada servicio se marca con o sin arma, y queda registrado quién lo confirmó. Se identifican porque el nombre del puesto contiene «Ocasional». Se puede exportar a Excel."
   },

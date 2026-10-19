@@ -474,6 +474,17 @@ def correr_pasos(args, desde, hasta, historial):
         log.info("--solo-descarga: la BD no se tocó. Fin.")
         return 0
 
+    # ---- catálogos de la API de SERPI ---------------------------------
+    # NIT, zona, identificador de puesto y cargo (catalogos_serpi.py). Va
+    # después del ETL para vincular también los puestos que llegaron hoy. No es
+    # parte de la auditoría: si la API de SERPI falla, se avisa y se sigue con
+    # los catálogos de la última vez. La auditoría no puede depender de ella.
+    rc_cat, _ = ejecutar("CATÁLOGOS API SERPI", [sys.executable, "catalogos_serpi.py"],
+                         timeout_s=10 * 60)
+    if rc_cat != 0:
+        log.warning("No se actualizaron los catálogos de SERPI (código %d). La corrida "
+                    "sigue con los de la última sincronización.", rc_cat)
+
     # ---- 3/3 motor ----------------------------------------------------
     # Se acota al mismo rango que se cargó: `_acotar` aplica ese filtro a
     # borrar_abiertas/marcar_resueltas/reabrir_reincidentes, así que sin él

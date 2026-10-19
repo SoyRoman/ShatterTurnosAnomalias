@@ -175,7 +175,25 @@ instalación desde cero la incluya.
 |---|---|---|
 | `migracion_004_usuarios.sql` | Cuentas, sesiones, bitácora de accesos | Aplicada por `bootstrap.sh` |
 | `migracion_005_historial.sql` | Tabla `corridas` (pestaña Historial) | Aplicada (2026-10-02) |
-| `migracion_006_tarifas_ocasionales.sql` | Tarifas de vigilancia y modalidad con/sin arma de los servicios ocasionales | **Aplicar al publicar la versión del 2026-10-19** |
+| `migracion_006_tarifas_ocasionales.sql` | Tarifas de vigilancia y modalidad con/sin arma de los servicios ocasionales | Aplicada (2026-10-19) |
+| `migracion_007_catalogos_serpi.sql` | Catálogos de la API de turnos de SERPI y vínculo puesto ↔ SERPI | Aplicada (2026-10-19) |
+
+### API de SERPI (catálogos)
+
+`catalogos_serpi.py` corre en cada actualización diaria, después de cargar la
+malla: copia de la API de turnos de SERPI los proyectos (NIT, centro de
+operación, zona), los puestos y las asignaciones (cargo, contrato), y vincula
+cada puesto de la malla con su puesto en SERPI. **No es parte de la
+auditoría**: si la API falla, la corrida sigue con los catálogos anteriores.
+
+Necesita `SERPI_TOKEN` y `SERPI_SECRET_KEY` en Parameter Store
+(`/turnos/SERPI_TOKEN`, `/turnos/SERPI_SECRET_KEY`, ambos `SecureString`). El
+token actual vence el **1 de enero de 2027**: hay que pedirle uno nuevo a
+SERPI antes. Sin token, los catálogos quedan congelados y el resto funciona.
+
+La API todavía **no** trae la programación día a día: la malla se sigue
+descargando del reporte. Falta pedirle a SERPI un endpoint de programación con
+la cédula del colaborador.
 
 ### Novedades del sistema
 

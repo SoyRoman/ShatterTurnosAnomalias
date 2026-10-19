@@ -65,9 +65,12 @@ needed = ["DB_HOST","DB_PORT","DB_NAME","DB_USER","DB_PASSWORD","DB_SSLMODE",
 missing = [k for k in needed if k not in params]
 if missing:
     raise SystemExit(f"faltan parametros: {missing}")
+# Opcionales: sin ellos el sistema funciona, solo no sincroniza los catalogos
+# de la API de SERPI (catalogos_serpi.py).
+opcionales = ["SERPI_TOKEN", "SERPI_SECRET_KEY"]
 path = "/opt/turnos/.env"
 with open(path, "w") as f:
-    for k in needed:
+    for k in needed + [k for k in opcionales if k in params]:
         f.write(f"{k}={params[k]}\n")
 uid = pwd.getpwnam("turnos").pw_uid
 gid = grp.getgrnam("turnos").gr_gid
@@ -131,7 +134,7 @@ export PGSSLMODE=require
 export PGSSLCERT=
 export PGSSLKEY=
 cd "$APP_DIR"
-for f in schema.sql migracion_004_usuarios.sql migracion_005_historial.sql migracion_006_tarifas_ocasionales.sql seed_reglas.sql vistas_reporte.sql; do
+for f in schema.sql migracion_004_usuarios.sql migracion_005_historial.sql migracion_006_tarifas_ocasionales.sql migracion_007_catalogos_serpi.sql seed_reglas.sql vistas_reporte.sql; do
   psql -h "$PGHOST" -U turnos_app -d turnos -v ON_ERROR_STOP=1 -f "$f"
 done
 unset PGPASSWORD
