@@ -839,6 +839,13 @@ async function iniciarOcasionales(){
     try{
       const cortes = await pedir('/ocasionales/cortes');
       sel.innerHTML = cortes.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+      // Abrir en el corte VIGENTE (hasta el 20 es el del mes; desde el 21, el
+      // siguiente), no en el primero de la lista: ese es el más nuevo, que
+      // casi no tiene turnos, y hacía creer que faltaban los ocasionales.
+      const hoy = new Date();
+      const vigente = new Date(hoy.getFullYear(), hoy.getMonth() + (hoy.getDate() > 20 ? 1 : 0), 1);
+      const clave = `${vigente.getFullYear()}-${String(vigente.getMonth() + 1).padStart(2, '0')}`;
+      if (cortes.includes(clave)) sel.value = clave;
     } catch(e){ /* sin cortes: cargarOcasionales muestra el error */ }
   }
   cargarOcasionales();

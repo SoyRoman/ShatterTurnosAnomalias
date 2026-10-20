@@ -449,7 +449,7 @@ class CambioClave(BaseModel):
 
 @app.get("/login", include_in_schema=False)
 def pagina_login():
-    return FileResponse(os.path.join(RAIZ, "login.html"))
+    return FileResponse(os.path.join(RAIZ, "login.html"), headers=SIN_CACHE)
 
 
 @app.post("/login")
@@ -658,9 +658,16 @@ def ejecutar(sql: str, params=(), devolver=False):
 # Dashboard (se sirve desde la misma app: un solo proceso que desplegar)
 # ---------------------------------------------------------------------------
 
+# El dashboard es un solo HTML con todo su JavaScript dentro. Sin esto el
+# navegador lo guarda en cache y, despues de publicar una version, cada
+# persona sigue viendo la vieja hasta que fuerza la recarga (visto el
+# 2026-10-20: una usuaria no veia los ocasionales y otra si).
+SIN_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+
 @app.get("/", include_in_schema=False)
 def dashboard():
-    return FileResponse(os.path.join(RAIZ, "dashboard.html"))
+    return FileResponse(os.path.join(RAIZ, "dashboard.html"), headers=SIN_CACHE)
 
 
 @app.get("/salud")

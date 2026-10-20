@@ -1,5 +1,11 @@
 [
   {
+    "fecha": "2026-10-20",
+    "tipo": "CORRECCION",
+    "titulo": "Servicios ocasionales abre en el corte vigente",
+    "detalle": "La pestaña abría en el corte más nuevo (el del mes siguiente, casi vacío), lo que hacía parecer que faltaban servicios. Ahora abre en el corte vigente: hasta el 20, el del mes; desde el 21, el siguiente. Además, el navegador ya no guarda una versión vieja del panel después de cada actualización."
+  },
+  {
     "fecha": "2026-10-19",
     "tipo": "MEJORA",
     "titulo": "Datos de la API de SERPI: NIT y zona",
